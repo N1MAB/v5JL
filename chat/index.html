@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chat - JupyterLab Companion</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: #252526;
+            padding: 16px 20px;
+            border-bottom: 1px solid #3e3e42;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #4ec9b0;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .header-info {
+            font-size: 12px;
+            color: #858585;
+        }
+
+        .quick-prompts {
+            background: #252526;
+            padding: 12px 20px;
+            border-bottom: 1px solid #3e3e42;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .quick-prompt-btn {
+            background: #2d2d30;
+            border: 1px solid #3e3e42;
+            color: #d4d4d4;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .quick-prompt-btn:hover {
+            background: #3e3e42;
+            border-color: #4ec9b0;
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            display: flex;
+            gap: 12px;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 8px;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: #2d4a5e;
+            color: #ffffff;
+        }
+
+        .message.assistant .message-content {
+            background: #2d2d30;
+            border: 1px solid #3e3e42;
+        }
+
+        .message-label {
+            font-size: 11px;
+            color: #858585;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+
+        .code-block {
+            background: #1e1e1e;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            padding: 12px;
+            margin: 8px 0;
+            position: relative;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+        }
+
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .code-lang {
+            color: #4ec9b0;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .copy-btn {
+            background: #2d2d30;
+            border: 1px solid #3e3e42;
+            color: #4ec9b0;
+            padding: 4px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: #3e3e42;
+        }
+
+        .copy-btn.copied {
+            background: #4ec9b0;
+            color: #1e1e1e;
+        }
+
+        .input-container {
+            background: #252526;
+            padding: 16px 20px;
+            border-top: 1px solid #3e3e42;
+            display: flex;
+            gap: 12px;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        #messageInput {
+            width: 100%;
+            background: #2d2d30;
+            border: 1px solid #3e3e42;
+            color: #d4d4d4;
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            resize: none;
+            font-family: inherit;
+            max-height: 120px;
+        }
+
+        #messageInput:focus {
+            outline: none;
+            border-color: #4ec9b0;
+        }
+
+        #sendBtn {
+            background: #4ec9b0;
+            border: none;
+            color: #1e1e1e;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+            align-self: flex-end;
+        }
+
+        #sendBtn:hover {
+            background: #5dd9c0;
+        }
+
+        #sendBtn:disabled {
+            background: #3e3e42;
+            color: #858585;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: flex;
+            gap: 4px;
+            padding: 8px 0;
+        }
+
+        .loading-dot {
+            width: 8px;
+            height: 8px;
+            background: #4ec9b0;
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+
+        .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1e1e1e;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #3e3e42;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #4e4e52;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>AI Code Assistant</h1>
+        <div class="header-info">Backend: <span id="backendStatus">Checking...</span></div>
+    </div>
+
+    <div class="quick-prompts">
+        <button class="quick-prompt-btn" data-prompt="Generate code to load and analyze a CSV file">Load CSV</button>
+        <button class="quick-prompt-btn" data-prompt="Create a visualization with matplotlib">Matplotlib Chart</button>
+        <button class="quick-prompt-btn" data-prompt="Create an interactive Plotly visualization">Plotly Chart</button>
+        <button class="quick-prompt-btn" data-prompt="Build a simple neural network with TensorFlow">TensorFlow NN</button>
+        <button class="quick-prompt-btn" data-prompt="Analyze data with pandas">Pandas Analysis</button>
+        <button class="quick-prompt-btn" data-prompt="Explain this error: ">Explain Error</button>
+    </div>
+
+    <div class="chat-container" id="chatContainer">
+        <div class="message assistant">
+            <div>
+                <div class="message-label">AI Assistant</div>
+                <div class="message-content">
+                    👋 Hi! I'm your AI coding assistant for JupyterLab. Ask me to generate Python code, explain concepts, or help debug issues.
+                    <br><br>
+                    Try the quick prompts above or type your own question!
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-container">
+        <div class="input-wrapper">
+            <textarea
+                id="messageInput"
+                placeholder="Ask me to generate code, explain concepts, or help with errors..."
+                rows="1"
+            ></textarea>
+        </div>
+        <button id="sendBtn">Send</button>
+    </div>
+
+    <script>
+        const BACKEND_URL = 'http://localhost:5000';
+        const chatContainer = document.getElementById('chatContainer');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const backendStatus = document.getElementById('backendStatus');
+
+        // Check backend status
+        async function checkBackend() {
+            try {
+                const response = await fetch(`${BACKEND_URL}/health`);
+                const data = await response.json();
+                backendStatus.textContent = '✓ Connected';
+                backendStatus.style.color = '#4ec9b0';
+            } catch (error) {
+                backendStatus.textContent = '✗ Disconnected';
+                backendStatus.style.color = '#f48771';
+            }
+        }
+
+        checkBackend();
+        setInterval(checkBackend, 30000);
+
+        // Auto-resize textarea
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+
+        // Quick prompts
+        document.querySelectorAll('.quick-prompt-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const prompt = btn.dataset.prompt;
+                messageInput.value = prompt;
+                messageInput.focus();
+                if (!prompt.endsWith(': ')) {
+                    sendMessage();
+                }
+            });
+        });
+
+        // Send message
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            // Add user message
+            addMessage('user', message);
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+
+            // Show loading
+            const loadingId = addLoading();
+            sendBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${BACKEND_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                const data = await response.json();
+                removeLoading(loadingId);
+
+                // Handle backend response format: {message, type, model, error}
+                if (data.error) {
+                    addMessage('assistant', data.error);
+                } else if (data.type === 'code') {
+                    // For code type, show message as code
+                    addMessage('assistant', 'Here\'s the code:', data.message);
+                } else {
+                    // For text type, show message as text
+                    addMessage('assistant', data.message || 'No response');
+                }
+            } catch (error) {
+                removeLoading(loadingId);
+                addMessage('assistant', `Error: ${error.message}`);
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        function addMessage(role, text, code = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+
+            const label = role === 'user' ? 'You' : 'AI Assistant';
+
+            let content = `
+                <div>
+                    <div class="message-label">${label}</div>
+                    <div class="message-content">${escapeHtml(text)}`;
+
+            if (code) {
+                content += `
+                    <div class="code-block">
+                        <div class="code-header">
+                            <span class="code-lang">Python</span>
+                            <button class="copy-btn" onclick="copyCode(this, \`${escapeForAttribute(code)}\`)">Copy</button>
+                        </div>
+                        <pre><code>${escapeHtml(code)}</code></pre>
+                    </div>`;
+            }
+
+            content += `</div></div>`;
+            messageDiv.innerHTML = content;
+
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function addLoading() {
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'message assistant';
+            loadingDiv.id = 'loading-' + Date.now();
+            loadingDiv.innerHTML = `
+                <div>
+                    <div class="message-label">AI Assistant</div>
+                    <div class="message-content">
+                        <div class="loading">
+                            <div class="loading-dot"></div>
+                            <div class="loading-dot"></div>
+                            <div class="loading-dot"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            chatContainer.appendChild(loadingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return loadingDiv.id;
+        }
+
+        function removeLoading(id) {
+            const loadingDiv = document.getElementById(id);
+            if (loadingDiv) loadingDiv.remove();
+        }
+
+        function copyCode(btn, code) {
+            navigator.clipboard.writeText(code);
+            const originalText = btn.textContent;
+            btn.textContent = '✓ Copied!';
+            btn.classList.add('copied');
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.classList.remove('copied');
+            }, 2000);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function escapeForAttribute(text) {
+            return text.replace(/`/g, '\\`').replace(/\$/g, '\\$');
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
