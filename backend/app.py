@@ -18,7 +18,6 @@ import time
 from typing import Dict, List, Tuple, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
-from werkzeug.utils import secure_filename
 
 import matplotlib
 matplotlib.use('Agg')  # Gebruik non-interactive backend
@@ -85,15 +84,46 @@ CORS(app)  # Enable CORS voor frontend requests
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# Upload folder configuration
-# Point to uploads folder in parent directory (since we're in backend/)
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads')
-ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'py', 'ipynb'}
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+# ============================================================================
+# SESSION MANAGEMENT - Per-tab isolation
+# ============================================================================
+# Each browser tab gets its own execution namespace (variables, state, etc.)
+# Sessions are identified by X-Session-ID header from frontend
+# Auto-cleanup removes sessions older than 1 hour
 
-# Global namespace voor code execution (om variabelen te behouden tussen executions)
-execution_namespace = {}
+session_namespaces = {}  # {session_id: {namespace: dict, last_access: timestamp}}
+SESSION_TIMEOUT = 3600  # 1 hour in seconds
+
+def get_session_namespace(session_id: str) -> dict:
+    """Get or create namespace for a session"""
+    now = time.time()
+
+    # Create new session if doesn't exist
+    if session_id not in session_namespaces:
+        session_namespaces[session_id] = {
+            'namespace': {},
+            'last_access': now
+        }
+        print(f"✓ Created new session: {session_id}")
+
+    # Update last access time
+    session_namespaces[session_id]['last_access'] = now
+
+    return session_namespaces[session_id]['namespace']
+
+def cleanup_old_sessions():
+    """Remove sessions that haven't been accessed in SESSION_TIMEOUT seconds"""
+    now = time.time()
+    expired = [
+        sid for sid, data in session_namespaces.items()
+        if now - data['last_access'] > SESSION_TIMEOUT
+    ]
+
+    for sid in expired:
+        del session_namespaces[sid]
+        print(f"🗑️  Cleaned up expired session: {sid}")
+
+    return len(expired)
 
 
 # ============================================================================
@@ -486,9 +516,89 @@ class CSVInspector:
             return report
 
     @staticmethod
+    def inspect_bytesio(file_bytes_io: io.BytesIO, filename: str) -> Dict:
+        """Comprehensive CSV inspection for in-memory BytesIO files"""
+        report = {
+            'filepath': f'<in-memory: {filename}>',
+            'delimiter': ',',
+            'header_row': 0,
+            'total_lines': 0,
+            'empty_lines': [],
+            'encoding': 'utf-8',
+            'issues': [],
+            'suggestions': []
+        }
+
+        try:
+            # Reset position to start
+            file_bytes_io.seek(0)
+
+            # Read first few lines to detect delimiter
+            lines_sample = []
+            for i in range(20):
+                line = file_bytes_io.readline()
+                if not line:
+                    break
+                lines_sample.append(line.decode('utf-8', errors='ignore'))
+
+            # Detect delimiter
+            delimiters = [',', ';', '\t', '|']
+            delimiter_counts = {d: 0 for d in delimiters}
+            for line in lines_sample[:10]:
+                for delim in delimiters:
+                    delimiter_counts[delim] += line.count(delim)
+            report['delimiter'] = max(delimiter_counts.items(), key=lambda x: x[1])[0]
+
+            # Find header row
+            max_fields = 0
+            header_row = 0
+            for i, line in enumerate(lines_sample):
+                if not line.strip():
+                    continue
+                fields = line.split(report['delimiter'])
+                non_empty = sum(1 for field in fields if field.strip())
+                if non_empty > max_fields:
+                    max_fields = non_empty
+                    header_row = i
+            report['header_row'] = header_row
+
+            # Count all lines and find empty ones
+            file_bytes_io.seek(0)
+            line_num = 0
+            while True:
+                line = file_bytes_io.readline()
+                if not line:
+                    break
+                if not line.decode('utf-8', errors='ignore').strip():
+                    report['empty_lines'].append(line_num)
+                line_num += 1
+            report['total_lines'] = line_num
+
+            # Analyze issues
+            if report['header_row'] > 0:
+                report['issues'].append(f"Header not on first line (found on line {report['header_row'] + 1})")
+                report['suggestions'].append(f"Skip first {report['header_row']} rows using skiprows={report['header_row']}")
+
+            if report['empty_lines']:
+                report['issues'].append(f"Found {len(report['empty_lines'])} empty lines")
+                report['suggestions'].append("Use skip_blank_lines=True in read_csv()")
+
+            if report['delimiter'] != ',':
+                report['issues'].append(f"Non-standard delimiter detected: '{report['delimiter']}'")
+                report['suggestions'].append(f"Use sep='{report['delimiter']}' in read_csv()")
+
+            # Reset position for later use
+            file_bytes_io.seek(0)
+            return report
+
+        except Exception as e:
+            report['issues'].append(f"Inspection failed: {str(e)}")
+            file_bytes_io.seek(0)
+            return report
+
+    @staticmethod
     def generate_fix_code(report: Dict) -> str:
-        """Generate pandas code to correctly load the CSV"""
-        filepath = report['filepath']
+        """Generate pandas code to correctly load the CSV from in-memory BytesIO"""
         params = []
 
         if report['delimiter'] != ',':
@@ -506,13 +616,15 @@ class CSVInspector:
         params_str = ', '.join(params) if params else ''
 
         code = f"""import pandas as pd
+import io
 
 # Auto-detected CSV parameters:
 # - Delimiter: '{report['delimiter']}'
 # - Header row: {report['header_row']}
 # - Empty lines: {len(report['empty_lines'])}
 
-df = pd.read_csv('{filepath}'{', ' + params_str if params_str else ''})
+# Load from in-memory file
+df = pd.read_csv(filepath{', ' + params_str if params_str else ''})
 
 print("Dataset loaded successfully!")
 print("="*50)
@@ -559,11 +671,12 @@ def capture_matplotlib_plots():
     return plots
 
 
-def capture_plotly_figures(vars_before_execution=None):
+def capture_plotly_figures(execution_namespace, vars_before_execution=None):
     """
     Capture Plotly figures als JSON voor interactive rendering
 
     Args:
+        execution_namespace: The namespace dict to search for Plotly figures
         vars_before_execution: Dict mapping variable names to object IDs before execution.
                               If provided, only NEW or MODIFIED figures are captured.
                               If None, all figures are captured (legacy behavior).
@@ -642,11 +755,15 @@ def health_check():
 
 @app.route('/restart_kernel', methods=['POST'])
 def restart_kernel():
-    """Restart the Python kernel - clear all variables and state"""
-    global execution_namespace
-
+    """Restart the Python kernel - clear all variables and state for this session"""
     try:
-        # Clear all variables from namespace
+        # Get session ID
+        session_id = request.headers.get('X-Session-ID')
+        if not session_id:
+            return jsonify({'error': 'No session ID provided'}), 400
+
+        # Clear all variables from this session's namespace
+        execution_namespace = get_session_namespace(session_id)
         execution_namespace.clear()
 
         # Close all matplotlib figures to free memory
@@ -654,7 +771,7 @@ def restart_kernel():
 
         return jsonify({
             'status': 'ok',
-            'message': 'Kernel restarted - all variables cleared'
+            'message': 'Kernel restarted - all variables cleared for this session'
         }), 200
     except Exception as e:
         return jsonify({
@@ -670,13 +787,49 @@ def restart_kernel():
 def execute_code():
     """
     Execute Python code with validation and retry logic
+    Now with SESSION ISOLATION - each browser tab has its own namespace
     """
     try:
+        # Get session ID from header (required for session isolation)
+        session_id = request.headers.get('X-Session-ID')
+        if not session_id:
+            return jsonify({'error': 'No session ID provided'}), 400
+
+        # Get or create namespace for this session
+        execution_namespace = get_session_namespace(session_id)
+
+        # Cleanup old sessions periodically
+        cleanup_old_sessions()
+
         data = request.get_json()
         code = data.get('code', '')
 
         if not code:
             return jsonify({'error': 'No code provided'}), 400
+
+        # Handle uploaded file data (if present)
+        file_data = data.get('fileData')  # base64
+        file_name = data.get('fileName')
+        file_extension = data.get('extension')
+
+        # If file is provided, decode and make available to code via special variable
+        if file_data and file_name:
+            print(f"📄 File provided: {file_name} ({file_extension})")
+            # Decode base64 to bytes
+            import base64
+            file_bytes = base64.b64decode(file_data)
+
+            # Store in namespace as BytesIO object with original filename
+            execution_namespace['__uploaded_file_bytes__'] = io.BytesIO(file_bytes)
+            execution_namespace['__uploaded_file_name__'] = file_name
+            execution_namespace['__uploaded_file_extension__'] = file_extension
+
+            # Inject helper code to make file easily accessible
+            # User can do: df = pd.read_csv(io.BytesIO(__uploaded_file_bytes__.getvalue()))
+            # But we make it even easier by providing 'filepath' variable
+            if file_extension in ['csv', 'xlsx', 'xls']:
+                # Auto-inject: make file accessible as 'filepath' variable
+                code = f"# Auto-injected: file access\nimport io\nfilepath = io.BytesIO(__uploaded_file_bytes__.getvalue())\n\n{code}"
 
         # Remove leading whitespace from all lines
         import textwrap
@@ -775,7 +928,7 @@ def execute_code():
                 error_output = stderr_capture.getvalue()
                 plots = capture_matplotlib_plots()
                 # Only capture NEW or MODIFIED Plotly figures from this execution
-                plotly_data = capture_plotly_figures(vars_before_execution)
+                plotly_data = capture_plotly_figures(execution_namespace, vars_before_execution)
 
                 result = output
                 if error_output:
@@ -857,15 +1010,24 @@ def execute_code():
 
 @app.route('/reset', methods=['POST'])
 def reset_namespace():
-    """Reset de execution namespace"""
-    global execution_namespace
-    execution_namespace = {}
-    return jsonify({'message': 'Namespace reset successfully'}), 200
+    """Reset de execution namespace for the current session"""
+    session_id = request.headers.get('X-Session-ID')
+    if not session_id:
+        return jsonify({'error': 'No session ID provided'}), 400
+
+    execution_namespace = get_session_namespace(session_id)
+    execution_namespace.clear()
+    return jsonify({'message': 'Namespace reset successfully for this session'}), 200
 
 
 @app.route('/variables', methods=['GET'])
 def get_variables():
-    """Get alle variabelen in de current namespace"""
+    """Get alle variabelen in de current namespace for the current session"""
+    session_id = request.headers.get('X-Session-ID')
+    if not session_id:
+        return jsonify({'error': 'No session ID provided'}), 400
+
+    execution_namespace = get_session_namespace(session_id)
     # Filter out built-in variables
     user_vars = {k: str(v) for k, v in execution_namespace.items()
                  if not k.startswith('__')}
@@ -1046,6 +1208,15 @@ def chat():
     Chat with OpenAI GPT-4o mini
     """
     try:
+        # Get session ID from header
+        session_id = request.headers.get('X-Session-ID')
+        if not session_id:
+            return jsonify({'error': 'No session ID provided'}), 400
+
+        # Get session-specific execution namespace
+        execution_namespace = get_session_namespace(session_id)
+        cleanup_old_sessions()
+
         data = request.get_json()
         message = data.get('message', '')
         history = data.get('history', [])
@@ -1068,28 +1239,29 @@ def chat():
         if is_csv_debug:
             print(f"\n🔍 CSV debug request detected: '{message}'")
 
-            # Find most recent CSV file in uploads folder
-            csv_files = []
-            for filename in os.listdir(UPLOAD_FOLDER):
-                if filename.lower().endswith('.csv'):
-                    filepath = os.path.join(UPLOAD_FOLDER, filename)
-                    mtime = os.path.getmtime(filepath)
-                    csv_files.append((filepath, mtime))
-
-            if not csv_files:
+            # Check if there's a CSV file in the session namespace
+            if '__uploaded_file_bytes__' not in execution_namespace or '__uploaded_file_name__' not in execution_namespace:
                 return jsonify({
-                    'message': 'No CSV files found. Please upload a CSV file first.',
+                    'message': 'No CSV file loaded. Please upload a CSV file first.',
                     'type': 'text',
                     'model': 'system',
                     'error': None
                 }), 200
 
-            # Get most recent CSV file
-            latest_csv = sorted(csv_files, key=lambda x: x[1], reverse=True)[0][0]
-            print(f"   Debugging file: {latest_csv}")
+            file_name = execution_namespace['__uploaded_file_name__']
+            if not file_name.lower().endswith('.csv'):
+                return jsonify({
+                    'message': f'Current file ({file_name}) is not a CSV file.',
+                    'type': 'text',
+                    'model': 'system',
+                    'error': None
+                }), 200
 
-            # Inspect the CSV file
-            report = CSVInspector.inspect_file(latest_csv)
+            print(f"   Debugging file: {file_name}")
+
+            # Inspect the CSV file from memory
+            file_bytes_io = execution_namespace['__uploaded_file_bytes__']
+            report = CSVInspector.inspect_bytesio(file_bytes_io, file_name)
 
             if not report['issues']:
                 # No issues found - file is clean
@@ -1119,112 +1291,402 @@ def chat():
         messages = [
             {"role": "system", "content": """You are a Python data analysis assistant in a Jupyter notebook with pandas, matplotlib, and plotly support.
 
-CORE PRINCIPLE: **MINIMALISM** - Generate the SHORTEST possible code that does EXACTLY what the user asks. Nothing more.
+🚨 CRITICAL FORMAT RULE - THIS IS THE FOUNDATION OF THE ENTIRE SYSTEM:
+==============================================================================
+Your response MUST start with EXACTLY ONE of these prefixes:
+- CODE: (when generating executable Python code)
+- TEXT: (when explaining, chatting, or answering questions)
 
-CRITICAL DECISION RULE:
-- If user asks to CREATE, MAKE, BUILD, DO, VISUALIZE, PLOT, SHOW, CALCULATE something → Respond with CODE:
-- If user asks to EXPLAIN existing code/output → Respond with TEXT: (analyze the provided code)
-- If user is just TALKING (greeting, general questions, chatting, saying thanks) → Respond with TEXT:
+After CODE: you MUST write ONLY pure executable Python code.
+❌ FORBIDDEN after CODE:: markdown blocks (```python), explanations, comments, text
+✅ REQUIRED after CODE:: pure Python code that can be directly executed
 
-IMPORTANT: When user says "maak" (Dutch for "make"), "create", "build" → ALWAYS generate CODE, not explanation!
+After TEXT: you can use markdown formatting (code blocks, bold, lists, etc.)
+==============================================================================
+
+CRITICAL DECISION RULE - Read this EVERY time:
+- User asks to CREATE, MAKE, BUILD, DO, VISUALIZE, PLOT, SHOW, CALCULATE → CODE:
+- User says "maak" (Dutch for "make"), "create", "build", "import", "load" → CODE:
+- Message contains "ERROR FIX REQUEST" → CODE: (special fix mode - see below)
+- User asks to EXPLAIN existing code/output → TEXT:
+- User is just TALKING (greeting, questions, chatting, thanks) → TEXT:
+
+ERROR FIX MODE - CRITICAL - Special handling for fix requests:
+When you see "ERROR FIX REQUEST", you are fixing broken code. Follow these rules:
+
+CRITICAL: Generate the COMPLETE, CORRECTED version of ALL the code.
+- NOT just the fixed line
+- NOT just the part that was broken
+- THE ENTIRE CODE with the fix applied
+
+Rules:
+1. ALWAYS respond with CODE: (never TEXT:)
+2. Generate the COMPLETE corrected version of ALL the user's code
+3. Fix the specific error mentioned (usually a typo or syntax error)
+4. Keep ALL the original functionality - only fix the error
+5. Don't add comments explaining the fix
+6. Don't add extra features or improvements
+7. The user will see your corrected code in a new cell
+
+Examples:
+
+User: "ERROR FIX REQUEST - Broken code: imdport pandas as pd"
+You: CODE:import pandas as pd
+
+User: "ERROR FIX REQUEST - Broken code:
+impt pandas as pd
+df = pd.read_csv('data.csv')
+df.head()"
+You: CODE:import pandas as pd
+df = pd.read_csv('data.csv')
+df.head()
+
+User: "ERROR FIX REQUEST - Broken code:
+import matplotlib.pyplot as plt
+x = [1, 2, 3]
+y = [4, 5, 6]
+plt.plot(x, y)
+plt.show("
+You: CODE:import matplotlib.pyplot as plt
+x = [1, 2, 3]
+y = [4, 5, 6]
+plt.plot(x, y)
+plt.show()
 
 CODE GENERATION RULES (only when user wants to DO something):
-1. Start with CODE: followed by executable Python code
-2. ONLY ONE CODE: block per response - never include multiple CODE: statements
-3. ⚠️ GENERATE MINIMAL CODE:
-   - Write the SHORTEST code that fulfills the request
-   - DO NOT add extra features, error handling, or robustness unless EXPLICITLY requested
-   - DO NOT add print statements, comments, or explanations unless asked
-   - Use simple, direct solutions - avoid complexity
-   - If user asks "load CSV" → Just use pd.read_csv(filepath) - don't inspect, analyze, or debug
-   - If user asks "plot X" → Just plot X - don't add titles, grids, styling unless asked
-   - If user asks "calculate Y" → Just calculate Y - don't print extra info unless asked
+1. Start response with: CODE:
+2. Write ONLY pure Python code - NO markdown, NO ```python blocks, NO explanations
+3. Code must be directly executable - what you write will be passed to Python exec()
 
-   EXAMPLES OF MINIMAL CODE:
-   ❌ WRONG (too much):
-   ```python
-   import pandas as pd
-   print("Loading data...")
-   df = pd.read_csv(filepath, encoding='utf-8', errors='ignore')
-   print(f"Loaded {len(df)} rows")
-   print("="*50)
-   df.info()
-   print("="*50)
-   print(df.head())
-   ```
+4. ⚠️ LIBRARY MANAGEMENT - CRITICAL (THIS IS FUNDAMENTAL):
+   Before writing code, CHECK "AVAILABLE CONTEXT:" section for imported libraries.
 
+   RULE 1: NEVER use a library without importing it first
+   ❌ WRONG: pd.read_csv(...) without import pandas as pd
+   ✅ CORRECT: First import, then use
+
+   RULE 2: NEVER import a library twice in the same session
+   If "Fully imported modules" shows: "pd, np, plt, sns"
+   ❌ WRONG: import pandas as pd (already imported!)
+   ✅ CORRECT: Just use pd directly
+
+   RULE 3: Import NEW libraries if not in context
+   Context shows: "Fully imported modules: pd, np"
+   User asks: "plot with matplotlib"
+   ✅ CORRECT: import matplotlib.pyplot as plt (first time)
+   Then use: plt.plot(...)
+
+   RULE 4: Track partial imports
+   If context shows: "from sklearn: load_iris"
+   ✅ CORRECT: Just call load_iris() directly
+   ❌ WRONG: from sklearn.datasets import load_iris (already imported!)
+
+   SUMMARY:
+   - Check context FIRST
+   - If library is listed → Use it (don't import again)
+   - If library is NOT listed → Import it once
+   - NEVER write code using libraries that aren't imported
+
+5. ⚠️ MINIMAL CODE ONLY:
+   - Write ONLY the code user asks for
+   - NO extra features, statistics, or visualizations unless requested
+   - NO explanatory comments unless user asks for explanation
+   - Keep it simple and direct
+
+   Example - User: "load CSV"
    ✅ CORRECT (minimal):
-   ```python
    df = pd.read_csv(filepath)
    df.head()
-   ```
 
-4. ⚠️ CRITICAL: ALWAYS CHECK AVAILABLE CONTEXT FIRST!
-   Before writing ANY code, look for "AVAILABLE CONTEXT:" section in the prompt.
+   Example - User: "boxplot"
+   ✅ CORRECT (just boxplot):
+   df.boxplot()
+   plt.show()
 
-   If you see "Available variables: df_iris (DataFrame: 150 rows x 5 cols)"
-   → DO NOT load iris again! Use the existing df_iris variable!
+   ❌ WRONG (too much):
+   # Creating distribution analysis...
+   df.boxplot()
+   df.describe()  # <- NOT asked for!
+   plt.show()
 
-   If you see "Already imported modules: pandas, sklearn"
-   → DO NOT import pandas or sklearn again! They're already available!
+6. ⚠️ VARIABLE REUSE:
+   Before creating new variables, check "Available variables" in context
 
-   EXAMPLES:
-   ❌ WRONG: Load iris again when df_iris exists
-   from sklearn.datasets import load_iris
-   iris = load_iris()
+   Example:
+   Context shows: "df_iris (DataFrame: 150 rows x 5 cols)"
+   User: "plot iris"
+   ❌ WRONG: Load iris again
+   ✅ CORRECT: Use existing df_iris variable
 
-   ✅ CORRECT: Use existing df_iris
-   fig = go.Figure(data=[go.Scatter(x=df_iris['sepal length (cm)'], y=df_iris['sepal width (cm)'])])
+7. Code formatting rules:
+   - NO markdown code blocks (no ```)
+   - NO explanatory text before/after code
+   - NO comments unless user asks for explanation
+   - Direct Python code only - clean and minimal
 
-   ❌ WRONG: Import pandas when already imported
-   import pandas as pd
-   df = pd.read_csv(...)
+8. ⚠️ DISPLAYING INTERMEDIATE RESULTS:
+   NEVER use display() - it doesn't work reliably. ALWAYS use print() with .to_string():
 
-   ✅ CORRECT: Just use pd directly (it's already imported)
-   df = pd.read_csv(...)
+   ❌ WRONG (doesn't work):
+   display(df.head())
+   display(df.describe())
 
-4. For datasets (iris, titanic, etc.), ONLY load them if NO DataFrame variable exists yet
-5. For INTERACTIVE visualizations (3D plots, zoom/pan), use plotly.graph_objects - END CODE AFTER fig = ... (no fig.show()!)
-6. For STATIC visualizations, use matplotlib with plt.show()
-   ⚠️ CRITICAL PLOTLY RULE: After creating Plotly figure, do NOT add fig.show() - backend captures 'fig' automatically!
-7. Import only NEW libraries that aren't already imported (check "Already imported modules:" in context)
-8. Do NOT add comments or explanations
-9. Return ONLY the code, nothing else after CODE:
-10. For yfinance: Use Ticker().history() instead of download() to avoid MultiIndex:
-    CORRECT: ticker = yf.Ticker('BTC-USD'); data = ticker.history(period='90d', auto_adjust=True)
-    WRONG: data = yf.download('BTC-USD', period='90d', auto_adjust=True)  # Creates MultiIndex!
-11. After yfinance download, ALWAYS check if data is empty before using
-12. For yfinance datetime access: use data.index directly, NOT reset_index() and data['Date']
-    CORRECT: fig.add_trace(go.Scatter(x=data.index, y=data['Close']))
-    WRONG: data = data.reset_index(); fig.add_trace(go.Scatter(x=data['Date'], y=data['Close']))
-13. For matplotlib bar charts: MUST use .values to convert pandas Series to numpy array
-    CORRECT: ax.bar(range(len(df)), df['Volume'].values, color='#888888', alpha=0.7)
-    WRONG: ax.bar(range(len(df)), df['Volume'], ...) - this causes TypeError with pandas Series
-14. ⚠️ SEABORN FIGURE-LEVEL FUNCTIONS: pairplot(), catplot(), lmplot(), relplot() create their OWN figure!
-    CORRECT: sns.pairplot(df, hue='species')  # No plt.figure() before!
-    WRONG: plt.figure(figsize=(8,8)); sns.pairplot(df, hue='species')  # Creates empty figure!
-    REASON: matplotlib can't handle pandas Series with DatetimeIndex directly, need .values
-15. NEVER use if __name__ == '__main__': - code is executed via exec() so this condition is always False
-16. Always call your main functions directly at the end, do NOT wrap in if __name__ check
+   ✅ CORRECT (always works):
+   print(df.head().to_string())  # Shows DataFrame as text
+   print(df.describe().to_string())  # Shows statistics
 
-CONVERSATIONAL RULES (when user is just talking):
+   For DataFrames and Series, ALWAYS use .to_string() before printing
+
+9. For Plotly: Create figure, do NOT call fig.show() (backend captures it automatically)
+10. For matplotlib: End with plt.show()
+11. NEVER use if __name__ == '__main__': (code runs via exec)
+
+FUZZY FILE LOADING - SMART FILE LOADING STRATEGY:
+
+⚠️ DECISION LOGIC - When to use fuzzy vs simple loading:
+
+FOR SIMPLE "import file" / "load file" requests → Use SIMPLE code (3-5 lines max):
+```python
+import pandas as pd
+df = pd.read_csv(filepath)
+df.head()
+```
+
+ONLY use FUZZY loading when:
+- User says "fuzzy load", "robust load", "detect encoding"
+- User reports file loading errors/problems
+- Previous simple load attempt failed
+
+ONLY generate DATA QUALITY REPORT when user asks:
+- "statistics", "analyze", "quality report", "show info", "describe data"
+- NOT for simple "import file" requests
+
+When user DOES ask for fuzzy loading or when simple loading fails:
+
+STEP 1: DETECT ENCODING (for CSV files)
+Use chardet to detect encoding before loading:
+```python
+import chardet
+# Read raw bytes to detect encoding
+filepath.seek(0)
+raw_data = filepath.read(10000)
+filepath.seek(0)
+detected = chardet.detect(raw_data)
+encoding = detected['encoding'] or 'utf-8'
+```
+
+STEP 2: DETECT DELIMITER (for CSV files)
+Try to detect delimiter by inspecting first few lines:
+```python
+# Peek at first line
+filepath.seek(0)
+first_line = filepath.readline().decode(encoding, errors='ignore')
+filepath.seek(0)
+
+# Count common delimiters
+delimiters = [',', ';', '\t', '|']
+delimiter_counts = {d: first_line.count(d) for d in delimiters}
+delimiter = max(delimiter_counts.items(), key=lambda x: x[1])[0]
+```
+
+STEP 3: LOAD WITH ROBUST PARAMETERS
+Always use these parameters for CSV loading:
+```python
+df = pd.read_csv(
+    filepath,
+    encoding=encoding,           # Use detected encoding
+    sep=delimiter,               # Use detected delimiter
+    engine='python',             # More forgiving than C engine
+    on_bad_lines='warn',         # Warn but continue on bad lines
+    skip_blank_lines=True,       # Skip empty lines
+    skipinitialspace=True,       # Strip leading whitespace
+    encoding_errors='replace'    # Replace invalid chars instead of failing
+)
+```
+
+STEP 4: DATA QUALITY REPORT (only when user requests it!)
+ONLY generate this report when user asks for "statistics", "analyze", "quality report", "show info":
+
+⚠️ DO NOT generate this automatically for simple "import file" requests!
+
+```python
+print("="*60)
+print("📊 DATA QUALITY REPORT")
+print("="*60)
+
+# 1. Dataset shape
+print(f"\\n📐 Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
+
+# 2. Memory usage
+memory_mb = df.memory_usage(deep=True).sum() / (1024**2)
+print(f"💾 Memory: {memory_mb:.2f} MB")
+
+# 3. Data types
+print(f"\\n📋 Column Types:")
+type_counts = df.dtypes.value_counts()
+for dtype, count in type_counts.items():
+    print(f"  • {dtype}: {count} column(s)")
+
+# 4. Missing values analysis
+print(f"\\n🔍 Missing Values:")
+missing = df.isnull().sum()
+missing_pct = (missing / len(df)) * 100
+missing_df = pd.DataFrame({
+    'Missing': missing[missing > 0],
+    'Percentage': missing_pct[missing > 0]
+}).sort_values('Missing', ascending=False)
+
+if len(missing_df) > 0:
+    print(missing_df.to_string())
+else:
+    print("  ✓ No missing values!")
+
+# 5. Duplicate rows
+duplicates = df.duplicated().sum()
+if duplicates > 0:
+    print(f"\\n⚠️  Duplicates: {duplicates:,} rows ({duplicates/len(df)*100:.1f}%)")
+else:
+    print(f"\\n✓ No duplicate rows")
+
+# 6. Numeric columns summary
+numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+if len(numeric_cols) > 0:
+    print(f"\\n📈 Numeric Columns Summary:")
+    print(df[numeric_cols].describe().to_string())
+
+# 7. Categorical columns summary
+categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+if len(categorical_cols) > 0:
+    print(f"\\n📝 Categorical Columns (unique values):")
+    for col in categorical_cols[:5]:  # First 5 only
+        unique_count = df[col].nunique()
+        print(f"  • {col}: {unique_count} unique value(s)")
+    if len(categorical_cols) > 5:
+        print(f"  ... and {len(categorical_cols) - 5} more")
+
+# 8. First few rows
+print(f"\\n👀 First 5 Rows:")
+print("="*60)
+print(df.head().to_string())
+
+print("="*60)
+print("✓ Data loaded successfully!")
+print("="*60)
+```
+
+CRITICAL RULES:
+1. Default to SIMPLE loading (3-5 lines) unless user asks for more
+2. NEVER add extra statistics or reports unless explicitly requested
+3. MINIMAL code - only what user asks for
+4. "boxplot" = just boxplot, NOT "distribution analysis" or extra charts
+5. If loading fails, THEN try fuzzy loading with encoding detection
+
+CONVERSATIONAL RULES - WHEN TO USE CODE: vs TEXT:
+
+⚠️ IMPORTANT DECISION LOGIC:
+
+Use CODE: when user wants to:
+- Generate/execute code: "maak", "create", "build", "write code"
+- Simple single-action tasks: "plot this", "calculate mean", "load CSV"
+- Quick visualizations: "show histogram", "create scatter plot"
+- Any single, focused code task
+
+Use TEXT: when user wants to:
+- Understand concepts: "what is ML", "explain", "how does X work"
+- Get advice: "which library", "best approach", "should I use"
+- Greetings/thanks: "hello", "thanks", "help"
+- Ask questions about theory: "why is pandas good"
+- ⚠️ STEP-BY-STEP tutorials: "leg uit met dataset", "stap voor stap", "learn with iris"
+
+🎯 EDUCATIONAL MODE - Multiple Code Blocks:
+When user wants step-by-step explanation with a dataset → Use TEXT: with MULTIPLE ```python blocks!
+
+Format for step-by-step tutorials:
+1. Use TEXT: (not CODE:)
+2. Break tutorial into small steps
+3. Each step = short explanation (1-2 sentences) + ```python code block
+4. Alternate: text → ```python → text → ```python → text → ```python
+
+Example structure for "leg uit over ml en gebruik iris dataset":
+TEXT:First, let's load the iris dataset and inspect it.
+
+```python
+from sklearn.datasets import load_iris
+import pandas as pd
+iris = load_iris()
+df = pd.DataFrame(iris.data, columns=iris.feature_names)
+df['species'] = iris.target
+print(df.head().to_string())
+```
+
+Next, we'll visualize the data to see patterns.
+
+```python
+import seaborn as sns
+import matplotlib.pyplot as plt
+sns.pairplot(df, hue='species')
+plt.show()
+```
+
+Now let's train a simple model.
+
+```python
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+X_train, X_test, y_train, y_test = train_test_split(iris.data, iris.target, test_size=0.2)
+model = LogisticRegression(max_iter=200)
+model.fit(X_train, y_train)
+print(f"Accuracy: {model.score(X_test, y_test)}")
+```
+
+⚠️ CRITICAL RULES for step-by-step tutorials:
+1. ALWAYS add text explanation BEFORE each ```python block
+2. NEVER put multiple ```python blocks in a row without text between them
+3. Pattern must be: text → ```python → text → ```python → text → ```python
+4. Each block focused on ONE step
+5. User can run each step separately to learn progressively
+
+Example of WRONG format (NO text between code blocks):
+```python
+import pandas as pd
+```
+```python
+df = pd.read_csv('data.csv')
+```
+
+Example of CORRECT format (text before EACH block):
+First, import the libraries we need.
+
+```python
+import pandas as pd
+```
+
+Now load the dataset.
+
+```python
+df = pd.read_csv('data.csv')
+```
+
+CONVERSATIONAL RULES (when using TEXT:):
 1. Start with TEXT: followed by your response
-2. Be helpful and friendly
-3. Answer questions about concepts, give advice
-4. ALWAYS use markdown formatting in your TEXT responses:
+2. ⚠️ BE CONCISE for simple questions (1-3 sentences max)
+   BUT for step-by-step tutorials: use multiple short explanations with code blocks
+3. Focus on answering the specific question - NO extra details
+4. For "Explain this" requests: Explain ONLY what was selected, briefly
+5. For tutorials: Break into steps with short intro per step (see Educational Mode above)
+6. Use markdown formatting:
    - Use code blocks with language specification: ```python for Python code examples
    - Use **bold** for emphasis
-   - Use headers (##, ###) to organize content
-   - Use lists (-, *) for bullet points
-   - Use numbered lists (1., 2., 3.) for sequential steps
-   - Use `inline code` for variable names, function names, and short code snippets
-   - Use > for important notes or quotes
-   - Use ASCII art and text visualizations to illustrate concepts:
-     * Box drawings: ┌─────┐  │     │  └─────┘
-     * Arrows: ─→ ←─ ↓ ↑
-     * Simple diagrams with |, -, +, /, \
-     * Tables and structured layouts
-     Example: Create flowcharts, diagrams, timelines using ASCII characters when explaining processes
+   - Use `inline code` for variable names, function names
+   - Use lists (-, *) only when necessary
+
+⚠️ SPECIAL FEATURE - Code Examples in TEXT Responses:
+When you include ```python code blocks in your TEXT responses, they automatically become EXECUTABLE code cells!
+- The user can click Run to execute them immediately
+- They can select code and click "Explain"
+- They can edit the code before running
+- This makes your examples interactive and immediately useful
+- Feel free to include code examples in explanations - they're fully functional!
 
 Examples:
 
@@ -1251,6 +1713,28 @@ Assistant: TEXT:You're welcome! Let me know if you need anything else.
 
 User: "what is pandas?"
 Assistant: TEXT:Pandas is a powerful Python library for data manipulation and analysis. It provides DataFrame structures for working with tabular data.
+
+User: "laten we leren met iris" OR "lets learn with iris"
+Assistant: CODE:# Load Iris dataset - classic ML dataset with flower measurements
+from sklearn.datasets import load_iris
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load data and convert to DataFrame for easy manipulation
+iris = load_iris()
+df = pd.DataFrame(iris.data, columns=iris.feature_names)
+df['species'] = iris.target
+
+# Show first rows - inspect data structure
+print(df.head().to_string())
+
+# Basic statistics - understand value ranges
+print(df.describe().to_string())
+
+# Visualize feature relationships - see class separation
+import seaborn as sns
+sns.pairplot(df, hue='species')
+plt.show()
 
 User: "visualize iris dataset"
 Assistant: CODE:from sklearn.datasets import load_iris
@@ -1544,27 +2028,25 @@ fig.update_layout(title='Iris 3D Scatter', scene=dict(xaxis_title='Sepal Length'
 
             context_message = context_message + namespace_info
 
-        # Add uploaded file info (NOT the content - for privacy and token savings!)
+        # Add uploaded file info (file is in browser memory, auto-injected as 'filepath' variable)
         if uploaded_file:
-            file_info = f"\n\nUPLOADED FILE INFO:\n"
+            file_info = f"\n\nFILE LOADED IN BROWSER:\n"
             file_info += f"- Filename: {uploaded_file['filename']}\n"
-            file_info += f"- File path on server: {uploaded_file['filepath']}\n"
             file_info += f"- File type: {uploaded_file['extension']}\n"
-            file_info += f"\nIMPORTANT INSTRUCTIONS FOR FUZZY FILE HANDLING:\n"
-            file_info += f"1. Use this exact filepath in your code: {uploaded_file['filepath']}\n"
-            file_info += f"2. The file is already on the server - DO NOT ask to see the content\n"
-            file_info += f"3. CSV/Excel files are often 'fuzzy' - they may have:\n"
-            file_info += f"   - Junk/test data in first few rows\n"
-            file_info += f"   - Wrong delimiter (semicolon instead of comma, or vice versa)\n"
-            file_info += f"   - Prefix characters like ';;' before each line\n"
-            file_info += f"   - Headers on wrong row\n"
+            file_info += f"- Location: Browser memory (not on server)\n"
+            file_info += f"\nIMPORTANT - FILE LOADING:\n"
+            file_info += f"1. The file is auto-injected as a BytesIO variable named 'filepath'\n"
+            file_info += f"2. Use: df = pd.read_csv(filepath) or df = pd.read_excel(filepath)\n"
+            file_info += f"3. The 'filepath' variable is already available - no need to import/create it\n"
+            file_info += f"4. CSV/Excel files may be 'fuzzy' with:\n"
+            file_info += f"   - Wrong delimiter (semicolon instead of comma)\n"
+            file_info += f"   - Headers on wrong row / junk data in first rows\n"
             file_info += f"   - BOM characters or encoding issues\n"
-            file_info += f"\n4. CSV/EXCEL LOADING - Keep it SIMPLE:\n"
-            file_info += f"   - First try: df = pd.read_csv(filepath) or df = pd.read_excel(filepath)\n"
-            file_info += f"   - If user mentions problems, THEN add parameters (sep, skiprows, etc)\n"
-            file_info += f"   - DO NOT proactively inspect/analyze/debug files unless user asks\n"
-            file_info += f"   - Show df.head() to verify loading if user asks to load data\n"
-            file_info += f"\n5. If loading fails, user can ask \"debug csv\" to get automatic analysis"
+            file_info += f"\n5. LOADING APPROACH:\n"
+            file_info += f"   - Start simple: df = pd.read_csv(filepath)\n"
+            file_info += f"   - If user mentions problems, add parameters (sep=';', skiprows=1, etc)\n"
+            file_info += f"   - Show df.head() to verify loading\n"
+            file_info += f"\n6. If loading fails, user can ask \"debug csv\" for automatic analysis"
             context_message = context_message + file_info
 
         # Add current message
@@ -1639,6 +2121,22 @@ fig.update_layout(title='Iris 3D Scatter', scene=dict(xaxis_title='Sepal Length'
         if content.startswith('CODE:'):
             response_type = 'code'
             content = content[5:].strip()
+
+            # 🚨 CRITICAL CLEANUP: Remove markdown code blocks if AI added them anyway
+            # This is a safety net - the system prompt should prevent this, but we clean up just in case
+            if content.startswith('```python'):
+                # Remove opening ```python and closing ```
+                content = re.sub(r'^```python\s*\n', '', content)
+                content = re.sub(r'\n```\s*$', '', content)
+                print("⚠️  WARNING: AI generated markdown blocks - auto-cleaned")
+            elif content.startswith('```'):
+                # Remove opening ``` and closing ```
+                content = re.sub(r'^```\s*\n', '', content)
+                content = re.sub(r'\n```\s*$', '', content)
+                print("⚠️  WARNING: AI generated markdown blocks - auto-cleaned")
+
+            content = content.strip()
+
         elif content.startswith('TEXT:'):
             content = content[5:].strip()
 
@@ -1700,49 +2198,6 @@ def debug_csv():
         }), 500
 
 
-def allowed_file(filename):
-    """Check if file extension is allowed"""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """
-    Upload CSV or Excel file
-    """
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file part'}), 400
-
-        file = request.files['file']
-
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
-        if not allowed_file(file.filename):
-            return jsonify({'error': 'File type not allowed. Only CSV, Excel, Python (.py), and Jupyter Notebook (.ipynb) files'}), 400
-
-        # Save file securely
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        # Get file extension
-        extension = filename.rsplit('.', 1)[1].lower()
-
-        return jsonify({
-            'filename': filename,
-            'filepath': filepath,
-            'extension': extension,
-            'message': 'File uploaded successfully'
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            'error': f'Upload error: {str(e)}'
-        }), 500
-
-
 @app.route('/libraries', methods=['GET'])
 def get_libraries():
     """
@@ -1772,39 +2227,6 @@ def get_libraries():
         return jsonify({
             'error': f'Error retrieving libraries: {str(e)}',
             'packages': []
-        }), 500
-
-
-@app.route('/read-file', methods=['GET'])
-def read_file():
-    """
-    Read content of uploaded file (for .py and .ipynb files)
-    """
-    try:
-        filepath = request.args.get('path', '')
-
-        if not filepath:
-            return jsonify({'error': 'No filepath provided'}), 400
-
-        # Security check: only allow reading from uploads folder
-        if not filepath.startswith(UPLOAD_FOLDER):
-            return jsonify({'error': 'Access denied: can only read from uploads folder'}), 403
-
-        if not os.path.exists(filepath):
-            return jsonify({'error': f'File not found: {filepath}'}), 404
-
-        # Read file content
-        with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        return jsonify({
-            'content': content,
-            'filepath': filepath
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            'error': f'Read error: {str(e)}'
         }), 500
 
 
