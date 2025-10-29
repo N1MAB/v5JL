@@ -145,6 +145,58 @@ System prompt configured for minimal, efficient code:
 
 **Verification**: `curl https://www.slimpunt.nl/v5JL/api/health` returns `{"message":"Backend is running","status":"ok"}`
 
+### 7. DataFrame HTML Tables + Privacy Features (October 29, 2025)
+**Major Feature Release**: Complete overhaul of DataFrame display and privacy architecture
+
+**Features Added**:
+
+1. **HTML Table Rendering**
+   - DataFrames now render as beautiful HTML tables instead of wrapped text
+   - Monkey-patched pandas `.to_string()` to output HTML automatically
+   - Features: sticky headers, alternating row colors, hover effects, scrollable containers
+   - Max height 600px with vertical/horizontal scrolling
+   - VS Code dark theme styling
+
+2. **Privacy by Design Architecture**
+   - `OutputFilter` class: Filters all code outputs before AI sees them
+   - `SensitiveColumnDetector`: Scans for PII (BSN, email, salary, medical data)
+   - Visual transparency: Users see what AI can/cannot see with badges
+   - AI only gets metadata (column names, types, counts) - NEVER raw data values
+   - Documentation: `PRIVACY_FEATURES.md`
+
+3. **AI Context Awareness**
+   - Tracks all imports from previous cells (no duplicate imports)
+   - Tracks available variables (DataFrames, lists, etc.) for reuse
+   - Auto-import pandas when CSV/Excel uploaded
+   - System prompt enhanced with import tracking rules
+   - Better namespace isolation per session
+
+4. **Code Quality Improvements**
+   - AI adds brief Dutch comments to explain code
+   - Comments placed BEFORE code they explain
+   - Minimal, focused code generation (only what user asks for)
+   - Better variable reuse across cells
+
+5. **UI/UX Fixes**
+   - Removed scatter matrix visualization (user request)
+   - Fixed mobile header overlap issues (removed excessive padding-top)
+   - Content starts directly under sticky header on all screen sizes
+   - Consistent layout desktop/tablet/mobile
+
+**Technical Implementation**:
+```python
+# Backend: Monkey-patch pandas to_string()
+def df_to_html_wrapper(self, *args, **kwargs):
+    html_table = self.to_html(classes='dataframe-output', ...)
+    return f"<!--HTML_TABLE_START-->{html_table}<!--HTML_TABLE_END-->"
+
+pd.DataFrame.to_string = df_to_html_wrapper
+```
+
+**Frontend**: Detects HTML table markers and renders with custom CSS styling
+
+**Deployment**: October 29, 2025 - Commit 55bb4e3
+
 ## File Structure
 
 ```
