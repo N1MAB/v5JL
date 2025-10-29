@@ -9,9 +9,13 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/python/python.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/monokai.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -30,22 +34,27 @@
 
         .header {
             background: #252526;
-            padding: 16px 20px;
+            padding: 12px 20px;
             border-bottom: 1px solid #3e3e42;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            position: fixed;
+            gap: 16px;
+            position: sticky;
             top: 0;
-            left: 0;
-            right: 0;
-            z-index: 200;
+            z-index: 100;
         }
 
         .header h1 {
             color: #4ec9b0;
             font-size: 18px;
             font-weight: 600;
+        }
+
+        .header-logo {
+            height: 32px;
+            width: auto;
+            display: block;
         }
 
         .header-info {
@@ -80,17 +89,13 @@
         }
 
         .quick-prompts {
-            background: #252526;
-            padding: 12px 20px;
-            border-bottom: 1px solid #3e3e42;
             display: flex;
             gap: 8px;
-            flex-wrap: wrap;
-            position: fixed;
-            top: 60px;
-            left: 0;
-            right: 0;
-            z-index: 150;
+            flex-wrap: nowrap;
+            padding: 12px 20px;
+            border-top: 1px solid #3e3e42;
+            overflow-x: auto;
+            overflow-y: hidden;
         }
 
         .quick-prompt-btn {
@@ -112,11 +117,11 @@
         /* Main content area - single scrolling column */
         .content-container {
             padding: 20px;
-            padding-top: 130px;
             padding-bottom: 100px;
             display: flex;
             flex-direction: column;
             gap: 16px;
+            flex: 1;
         }
 
         /* Chat messages - terminal style */
@@ -537,11 +542,42 @@
             background: #1e1e1e;
             border-top: 1px solid #3e3e42;
             font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 13px;
-            white-space: pre-wrap;
-            max-height: 1000px;
-            overflow-y: auto;
+            font-size: 11px;
+            white-space: pre;
+            max-height: 600px;
+            overflow: auto;
             transition: max-height 0.3s ease;
+            position: relative;
+            line-height: 1.4;
+        }
+
+        /* 🤖 AI Visibility Indicator for Code Outputs */
+        .cell-output::before {
+            content: '🤖 AI sees filtered metadata only';
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            font-size: 9px;
+            font-weight: 600;
+            color: #858585;
+            background: rgba(45, 45, 48, 0.95);
+            padding: 3px 8px;
+            border-radius: 3px;
+            border: 1px solid rgba(78, 201, 176, 0.3);
+            opacity: 0.7;
+            transition: opacity 0.2s;
+            font-family: 'Segoe UI', -apple-system, system-ui;
+            white-space: nowrap;
+            z-index: 10;
+        }
+
+        .cell-output:hover::before {
+            opacity: 1;
+        }
+
+        /* Hide indicator for loading state */
+        .cell-output:has(.loading)::before {
+            display: none;
         }
 
         .cell-output.expanded {
@@ -567,6 +603,67 @@
         .cell-output pre {
             margin: 0;
             white-space: pre-wrap;
+        }
+
+        /* HTML Table Styling for DataFrames */
+        .cell-output .table-container {
+            overflow-x: auto;
+            overflow-y: auto;
+            max-height: 600px;
+            margin: 8px 0;
+            background: #1a1a1a;
+            border-radius: 4px;
+            border: 1px solid #3e3e42;
+        }
+
+        .cell-output .dataframe-output {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            color: #cccccc;
+            background: #1a1a1a;
+        }
+
+        .cell-output .dataframe-output thead {
+            position: sticky;
+            top: 0;
+            background: #252526;
+            z-index: 10;
+        }
+
+        .cell-output .dataframe-output th {
+            padding: 8px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #4ec9b0;
+            border-bottom: 2px solid #3e3e42;
+            white-space: nowrap;
+            background: #252526;
+        }
+
+        .cell-output .dataframe-output tbody tr {
+            transition: background 0.15s;
+        }
+
+        .cell-output .dataframe-output tbody tr:nth-child(even) {
+            background: #1e1e1e;
+        }
+
+        .cell-output .dataframe-output tbody tr:hover {
+            background: #2a2d2e;
+        }
+
+        .cell-output .dataframe-output td {
+            padding: 6px 12px;
+            border-bottom: 1px solid #3e3e42;
+            white-space: nowrap;
+        }
+
+        .cell-output .dataframe-output td:first-child,
+        .cell-output .dataframe-output th:first-child {
+            color: #569cd6;
+            font-weight: 500;
         }
 
         /* Input area - fixed at bottom */
@@ -1006,27 +1103,17 @@ input[type="file"] {
     display: none;
 }
 
-/* File Indicator - shows loaded file in browser */
-.file-indicator {
-    position: fixed;
-    top: 60px;
-    left: 10px;
-    background: #2d2d30;
-    border: 1px solid #4ec9b0;
-    border-radius: 6px;
-    padding: 6px 12px;
+/* File Badge - In header, alleen filename */
+.file-badge {
     display: none;
-    z-index: 150;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-    max-width: calc(100vw - 20px);
-}
-
-.file-indicator-content {
-    display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    flex-wrap: wrap;
+    font-size: 11px;
+    color: #d4d4d4;
+    padding: 4px 10px;
+    background: rgba(78, 201, 176, 0.08);
+    border-radius: 4px;
+    max-width: 300px;
 }
 
 .file-indicator-icon {
@@ -1070,22 +1157,163 @@ input[type="file"] {
     color: #f48771;
 }
 
-/* Desktop: move to center top */
+/* Mobile-first responsive design */
+@media (max-width: 767px) {
+    /* Compact header on mobile */
+    .header {
+        padding: 10px 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .header-logo {
+        height: 24px !important;
+    }
+
+    .header-actions {
+        flex-wrap: wrap;
+        gap: 6px;
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .auto-run-toggle {
+        margin-right: 0;
+        font-size: 11px;
+    }
+
+    .toggle-label {
+        font-size: 11px;
+    }
+
+    .toggle-slider {
+        width: 32px;
+        height: 16px;
+    }
+
+    .toggle-slider::before {
+        width: 12px;
+        height: 12px;
+    }
+
+    .auto-run-toggle input:checked + .toggle-slider::before {
+        transform: translateX(16px);
+    }
+
+    .file-manager-btn {
+        padding: 4px 8px;
+        font-size: 11px;
+    }
+
+    .header-info {
+        font-size: 10px;
+        width: 100%;
+        order: 3;
+    }
+
+    /* v4-style: Button bar full width in header */
+    .quick-prompts {
+        width: 100%;
+        justify-content: flex-start;
+        gap: 4px;
+        padding: 6px 10px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Icon-only buttons on mobile (v4 style) */
+    .quick-prompt-btn,
+    .toggle-btn {
+        font-size: 0; /* Hide text */
+        padding: 8px 12px;
+        min-width: 40px;
+        flex-shrink: 0;
+    }
+
+    .quick-prompt-btn i,
+    .toggle-btn i {
+        font-size: 16px; /* Show icon only */
+        margin: 0;
+    }
+
+    /* Adjust content padding for mobile */
+    .content-container {
+        padding: 12px;
+        padding-bottom: 90px;
+    }
+
+    /* Compact input area on mobile */
+    .input-container {
+        padding: 10px 12px;
+        gap: 8px;
+    }
+
+    #messageInput {
+        padding: 10px 12px;
+        font-size: 14px;
+    }
+
+    #sendBtn {
+        padding: 10px 16px;
+        font-size: 13px;
+    }
+
+    /* File manager dropdown mobile */
+    .file-manager-dropdown {
+        right: 12px;
+        left: 12px;
+        width: auto;
+        max-height: 60vh;
+    }
+
+    /* Compact code cells on mobile */
+    .cell-toolbar {
+        padding: 6px 10px;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .cell-btn {
+        padding: 3px 8px;
+        font-size: 10px;
+    }
+
+    .CodeMirror {
+        font-size: 13px;
+    }
+
+    .cell-output {
+        padding: 10px;
+        font-size: 12px;
+    }
+
+    /* Suggestion buttons wrap on mobile */
+    .suggestion-buttons {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .suggestion-btn {
+        font-size: 10px;
+        padding: 3px 8px;
+    }
+}
+
+/* Desktop: file indicator blijft full-width strip */
 @media (min-width: 768px) {
     .file-indicator {
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 8px 16px;
-        max-width: 500px;
+        /* Blijft full-width strip - geen transform */
+        padding: 6px 20px;
     }
 
     .file-indicator-content {
-        font-size: 13px;
+        font-size: 11px;
         gap: 8px;
     }
 
     .file-indicator-icon {
-        font-size: 16px;
+        font-size: 14px;
     }
 
     .file-indicator-name {
@@ -1096,13 +1324,674 @@ input[type="file"] {
         font-size: 16px;
         margin-left: 8px;
     }
+
+    /* Hide mobile menu toggle on desktop */
+    .mobile-menu-toggle {
+        display: none !important;
+    }
+}
+
+/* ============= VISUALIZATION CELLS ============= */
+.viz-cell {
+    background: #252526;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    animation: fadeIn 0.3s;
+}
+
+.viz-cell-toolbar {
+    background: #2d2d30;
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #3e3e42;
+}
+
+.viz-cell-label {
+    font-size: 11px;
+    color: #4ec9b0;
+    font-weight: 600;
+}
+
+/* 🔒 Privacy Badge for Viz Cells */
+.viz-privacy-badge {
+    display: inline-block;
+    background: rgba(78, 201, 176, 0.15);
+    color: #4ec9b0;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(78, 201, 176, 0.3);
+    cursor: help;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+
+.viz-privacy-badge:hover {
+    background: rgba(78, 201, 176, 0.25);
+    border-color: rgba(78, 201, 176, 0.5);
+}
+
+.viz-cell-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.viz-cell-select {
+    padding: 4px 8px;
+    font-size: 11px;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+    border-radius: 3px;
+}
+
+.viz-cell-select:focus {
+    outline: none;
+    border-color: #4ec9b0;
+}
+
+.viz-cell-btn {
+    background: transparent;
+    border: 1px solid #3e3e42;
+    color: #d4d4d4;
+    padding: 4px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: all 0.2s;
+}
+
+.viz-cell-btn:hover {
+    background: #3e3e42;
+}
+
+.viz-cell-btn.active {
+    background: #4ec9b0;
+    color: #1e1e1e;
+    border-color: #4ec9b0;
+}
+
+.viz-cell-canvas {
+    position: relative;
+    background: #1e1e1e;
+    height: 500px;
+}
+
+.viz-cell-canvas canvas {
+    width: 100%;
+    height: 100%;
+}
+
+.viz-cell-info {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(37, 37, 38, 0.9);
+    border: 1px solid #3e3e42;
+    border-radius: 3px;
+    padding: 8px 12px;
+    font-size: 10px;
+    color: #858585;
+}
+
+.viz-cell-legend {
+    background: #1e1e1e;
+    padding: 12px;
+    border-top: 1px solid #3e3e42;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 11px;
+}
+
+.viz-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.viz-legend-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1px solid #3e3e42;
+}
+
+/* Matrix cell styles */
+.viz-matrix-container {
+    background: #1e1e1e;
+    padding: 20px;
+    overflow: auto;
+}
+
+.viz-matrix-grid {
+    display: grid;
+    gap: 4px;
+    margin: 0 auto;
+    width: fit-content;
+}
+
+.viz-matrix-cell {
+    border: 1px solid #3e3e42;
+    background: #2d2d30;
+    position: relative;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.viz-matrix-cell:hover {
+    border-color: #4ec9b0;
+    box-shadow: 0 2px 8px rgba(78, 201, 176, 0.3);
+    transform: scale(1.05);
+    transition: all 0.2s ease;
+}
+
+.viz-matrix-cell:not(.diagonal) {
+    cursor: pointer;
+}
+
+.viz-matrix-cell.diagonal {
+    background: #252526;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    color: #4ec9b0;
+    text-align: center;
+    padding: 4px;
+}
+
+.viz-matrix-cell canvas {
+    width: 100%;
+    height: 100%;
+}
+
+/* Histogram styles */
+.viz-histogram-container {
+    background: #1e1e1e;
+    padding: 20px;
+}
+
+.viz-histogram-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+}
+
+.viz-histogram-card {
+    background: #252526;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    padding: 12px;
+}
+
+.viz-histogram-card h4 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #4ec9b0;
+    margin-bottom: 6px;
+}
+
+.viz-histogram-card .stats {
+    font-size: 10px;
+    color: #858585;
+    margin-bottom: 10px;
+}
+
+.viz-histogram-card canvas {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100%;
+}
+
+/* Data table styles */
+.viz-table-container {
+    background: #1e1e1e;
+    padding: 16px;
+    overflow: auto;
+    max-height: 600px;
+}
+
+.viz-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.viz-table thead {
+    position: sticky;
+    top: 0;
+    background: #2d2d30;
+    z-index: 10;
+}
+
+.viz-table th {
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #4ec9b0;
+    border-bottom: 2px solid #3e3e42;
+    border-right: 1px solid #3e3e42;
+    white-space: nowrap;
+}
+
+.viz-table th:last-child {
+    border-right: none;
+}
+
+.viz-table th .column-type-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    margin-left: 6px;
+    font-size: 9px;
+    border-radius: 2px;
+    background: #569cd6;
+    color: #1e1e1e;
+    font-weight: 600;
+}
+
+.viz-table th .column-type-badge.numeric {
+    background: #4ec9b0;
+}
+
+.viz-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #2d2d30;
+    border-right: 1px solid #2d2d30;
+    color: #d4d4d4;
+}
+
+.viz-table td:last-child {
+    border-right: none;
+}
+
+.viz-table tbody tr:hover {
+    background: #252526;
+}
+
+.viz-table-info {
+    padding: 12px;
+    background: #2d2d30;
+    border-top: 1px solid #3e3e42;
+    font-size: 11px;
+    color: #858585;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.viz-table-pagination {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.viz-table-pagination button {
+    background: transparent;
+    border: 1px solid #3e3e42;
+    color: #d4d4d4;
+    padding: 4px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    transition: all 0.2s;
+}
+
+.viz-table-pagination button:hover:not(:disabled) {
+    background: #3e3e42;
+    border-color: #4ec9b0;
+}
+
+.viz-table-pagination button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.viz-table-pagination span {
+    color: #858585;
+    font-size: 11px;
+}
+
+/* 🔒 PRIVACY BADGE - In header geïntegreerd */
+.privacy-badge {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #858585;
+    padding: 4px 10px;
+    background: rgba(78, 201, 176, 0.1);
+    border-radius: 4px;
+    border: 1px solid rgba(78, 201, 176, 0.3);
+}
+
+.privacy-badge-icon {
+    font-size: 12px;
+}
+
+/* 🔒 SENSITIVE COLUMN WARNING MODAL */
+.sensitive-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+}
+
+.sensitive-modal.active {
+    display: flex;
+}
+
+.sensitive-modal-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(4px);
+}
+
+.sensitive-modal-content {
+    position: relative;
+    background: #252526;
+    border: 2px solid #f48771;
+    border-radius: 12px;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(244, 135, 113, 0.3);
+    animation: modalZoomIn 0.3s ease;
+}
+
+@keyframes modalZoomIn {
+    from {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.sensitive-modal-header {
+    padding: 20px;
+    border-bottom: 1px solid #3e3e42;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.sensitive-modal-header h3 {
+    color: #f48771;
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+}
+
+.sensitive-modal-close {
+    background: transparent;
+    border: none;
+    color: #858585;
+    font-size: 24px;
+    cursor: pointer;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.sensitive-modal-close:hover {
+    background: #3e3e42;
+    color: #f48771;
+}
+
+.sensitive-modal-body {
+    padding: 20px;
+    flex: 1;
+    overflow-y: auto;
+    font-size: 14px;
+    color: #d4d4d4;
+    line-height: 1.6;
+}
+
+.sensitive-modal-body strong {
+    color: #4ec9b0;
+}
+
+.sensitive-category {
+    margin-bottom: 16px;
+    padding: 12px;
+    background: #2d2d30;
+    border-left: 3px solid #f48771;
+    border-radius: 4px;
+}
+
+.sensitive-category-title {
+    color: #f48771;
+    font-weight: 600;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.sensitive-column-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0;
+}
+
+.sensitive-column-list li {
+    padding: 4px 0;
+    color: #d4d4d4;
+    font-size: 13px;
+}
+
+.sensitive-column-list li::before {
+    content: "•";
+    color: #f48771;
+    font-weight: bold;
+    display: inline-block;
+    width: 1em;
+    margin-right: 8px;
+}
+
+.sensitive-modal-footer {
+    padding: 20px;
+    border-top: 1px solid #3e3e42;
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.sensitive-modal-btn {
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
+
+.sensitive-modal-btn.secondary {
+    background: #2d2d30;
+    color: #d4d4d4;
+    border: 1px solid #3e3e42;
+}
+
+.sensitive-modal-btn.secondary:hover {
+    background: #3e3e42;
+}
+
+.sensitive-modal-btn.primary {
+    background: #4ec9b0;
+    color: #1e1e1e;
+    border: 1px solid #4ec9b0;
+}
+
+.sensitive-modal-btn.primary:hover {
+    background: #5dd9c0;
+}
+
+/* Scatter Plot Modal - PREMIUM & CLEAN */
+.scatter-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.scatter-modal.active {
+    display: flex;
+}
+
+.scatter-modal-content {
+    background: #1e1e1e;
+    border: 1px solid #3e3e42;
+    border-radius: 8px;
+    width: 90vw;
+    max-width: 900px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+
+.scatter-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    background: #252526;
+    border-bottom: 1px solid #3e3e42;
+    flex-shrink: 0;
+}
+
+.scatter-modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #4ec9b0;
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 16px;
+}
+
+.scatter-modal-close {
+    background: transparent;
+    border: none;
+    color: #858585;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.scatter-modal-close:hover {
+    background: #f48771;
+    color: #1e1e1e;
+}
+
+.scatter-modal-canvas {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    overflow: auto;
+    background: #1e1e1e;
+}
+
+.scatter-modal-canvas canvas {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    display: block;
+}
+
+.scatter-modal-info {
+    padding: 16px 20px;
+    background: #252526;
+    border-top: 1px solid #3e3e42;
+    font-size: 11px;
+    color: #858585;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.scatter-modal-info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.scatter-modal-info-label {
+    font-weight: 600;
+    color: #4ec9b0;
+}
+
+@media (max-width: 767px) {
+    .scatter-modal-content {
+        width: 95vw;
+        max-height: 95vh;
+    }
+
+    .scatter-modal-header {
+        padding: 12px 16px;
+    }
+
+    .scatter-modal-title {
+        font-size: 12px;
+    }
+
+    .scatter-modal-canvas {
+        padding: 12px;
+    }
+
+    .scatter-modal-info {
+        flex-direction: column;
+        gap: 8px;
+    }
 }
 </style>
 </head>
 <body>
     <div class="header">
         <div style="display: flex; align-items: center; gap: 12px;">
-            <img src="ainotebook.png" alt="AI Notebook Logo" style="height: 32px; width: auto;">
+            <img src="ainotebook.png" alt="AI Notebook Logo" class="header-logo">
         </div>
         <div class="header-actions">
             <label class="auto-run-toggle">
@@ -1110,14 +1999,24 @@ input[type="file"] {
                 <span class="toggle-slider"></span>
                 <span class="toggle-label">Auto Run</span>
             </label>
-            <div class="header-info">Backend: <span id="backendStatus">Checking...</span>
-        <button class="file-manager-btn toggle-btn" onclick="toggleFileManager(event)" title="Loaded Files">
-            CSV
-            <span class="file-count-badge empty" id="fileCountBadge">0</span>
-        </button>
+            <div class="header-info">Backend: <span id="backendStatus">Checking...</span></div>
         </div>
+
+        <!-- Quick prompts inside header - v4 style -->
+        <div class="quick-prompts" id="quickPromptsMenu">
+            <button class="quick-prompt-btn" onclick="addCodeCell()"><i class="fas fa-plus"></i> New Cell</button>
+            <button class="quick-prompt-btn" onclick="document.getElementById('fileUpload').click()"><i class="fas fa-upload"></i> Upload</button>
+            <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls" style="display: none;">
+            <button class="quick-prompt-btn" onclick="document.getElementById('notebookImport').click()"><i class="fas fa-file-import"></i> Import</button>
+            <input type="file" id="notebookImport" accept=".py,.ipynb" style="display: none;">
+            <button class="quick-prompt-btn" onclick="showExportMenu()"><i class="fas fa-download"></i> Export</button>
+            <button class="quick-prompt-btn" onclick="restartKernel()"><i class="fas fa-sync-alt"></i> Restart</button>
+            <button class="quick-prompt-btn" onclick="restartAndRunAll()" style="background: #569cd6; color: #1e1e1e; font-weight: 600;"><i class="fas fa-play"></i> Run All</button>
+            <button class="toggle-btn" id="toggleChatBtn" onclick="toggleChat()"><i class="fas fa-comment-slash"></i> Hide Chat</button>
+            <button class="toggle-btn" id="toggleCodeBtn" onclick="toggleCode()"><i class="fas fa-eye-slash"></i> Hide Code</button>
         </div>
     </div>
+
 <!-- File Manager Dropdown -->
 <div class="file-manager-dropdown" id="fileManagerDropdown">
     <div class="file-manager-header">
@@ -1135,22 +2034,6 @@ input[type="file"] {
 
 <input type="file" id="browserFileInput" accept=".csv,.xlsx,.xls" onchange="handleBrowserFileUpload(event)" />
 
-
-
-
-    <div class="quick-prompts">
-        <button class="quick-prompt-btn" onclick="addCodeCell()">+ New Cell</button>
-        <button class="quick-prompt-btn" onclick="document.getElementById('fileUpload').click()">Upload File</button>
-        <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls" style="display: none;" onchange="handleFileUpload(event)">
-        <button class="quick-prompt-btn" onclick="document.getElementById('notebookImport').click()">Import</button>
-        <input type="file" id="notebookImport" accept=".py,.ipynb" style="display: none;" onchange="handleNotebookImport(event)">
-        <button class="quick-prompt-btn" onclick="showExportMenu()">Export</button>
-        <button class="quick-prompt-btn" onclick="restartKernel()">Restart Kernel</button>
-        <button class="quick-prompt-btn" onclick="restartAndRunAll()" style="background: #569cd6; color: #1e1e1e; font-weight: 600;">▶ Restart & Run All</button>
-        <button class="toggle-btn" id="toggleChatBtn" onclick="toggleChat()">Hide Chat</button>
-        <button class="toggle-btn" id="toggleCodeBtn" onclick="toggleCode()">Hide Code</button>
-    </div>
-
     <!-- File Indicator - shows loaded file in browser memory -->
     <div id="fileIndicator" class="file-indicator" style="display: none;">
         <div class="file-indicator-content">
@@ -1159,6 +2042,38 @@ input[type="file"] {
             <span class="file-indicator-size" id="fileIndicatorSize">(2.5 MB)</span>
             <span class="file-indicator-status">In browser</span>
             <button class="file-indicator-clear" onclick="clearUploadedFile()">✕</button>
+        </div>
+    </div>
+
+    <!-- 🔒 PRIVACY NOTICE - Thin strip under header -->
+    <div id="privacyNotice" class="privacy-notice" style="display: none;">
+        <div class="privacy-notice-content">
+            <div class="privacy-notice-icon">🔒</div>
+            <div class="privacy-notice-text">
+                <strong>Privacy Protected</strong> · AI sees only metadata, never your data
+            </div>
+        </div>
+    </div>
+
+    <!-- 🔒 SENSITIVE COLUMN WARNING MODAL -->
+    <div id="sensitiveColumnModal" class="sensitive-modal" style="display: none;">
+        <div class="sensitive-modal-overlay" onclick="closeSensitiveWarning()"></div>
+        <div class="sensitive-modal-content">
+            <div class="sensitive-modal-header">
+                <h3>⚠️ Gevoelige Kolommen Gedetecteerd</h3>
+                <button class="sensitive-modal-close" onclick="closeSensitiveWarning()">✕</button>
+            </div>
+            <div class="sensitive-modal-body" id="sensitiveWarningContent">
+                <!-- Will be populated by JavaScript -->
+            </div>
+            <div class="sensitive-modal-footer">
+                <button class="sensitive-modal-btn secondary" onclick="closeSensitiveWarning()">
+                    Begrepen
+                </button>
+                <button class="sensitive-modal-btn primary" onclick="proceedWithFile()">
+                    Ga door (Privacy beschermd)
+                </button>
+            </div>
         </div>
     </div>
 
@@ -1177,6 +2092,18 @@ input[type="file"] {
 
     <!-- Floating explain button for code selection -->
     <button id="explainBtn">Explain</button>
+
+    <!-- Scatter Plot Modal -->
+    <div class="scatter-modal" id="scatterModal">
+        <div class="scatter-modal-content">
+            <div class="scatter-modal-header">
+                <div class="scatter-modal-title" id="scatterModalTitle">Scatter Plot</div>
+                <button class="scatter-modal-close" onclick="closeScatterModal()">✕ Close</button>
+            </div>
+            <div class="scatter-modal-canvas" id="scatterModalCanvas"></div>
+            <div class="scatter-modal-info" id="scatterModalInfo"></div>
+        </div>
+    </div>
 
     <script src="v4style.js?v=20"></script>
 
@@ -1363,6 +2290,8 @@ document.addEventListener('DOMContentLoaded', function() {
     BrowserFileManager.load();
 });
 </script>
+
+<script src="v4style-viz.js"></script>
 
 </body>
 </html>

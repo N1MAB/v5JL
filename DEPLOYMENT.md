@@ -27,12 +27,17 @@ location /v5JL {
 
 #### Backend API Route
 ```nginx
-location /v5JL/api {
-    # Proxy to Flask backend
-    proxy_pass http://127.0.0.1:5010;
+location /v5JL/api/ {
+    auth_basic off;  # Bypass authentication for API
+    # Proxy to Flask backend (trailing slash strips /v5JL/api prefix)
+    proxy_pass http://127.0.0.1:5010/;
     # ... proxy headers ...
 }
 ```
+
+**Important**: The trailing slashes in both `location` and `proxy_pass` are critical:
+- `location /v5JL/api/` + `proxy_pass http://127.0.0.1:5010/` → strips `/v5JL/api` prefix
+- Request: `https://slimpunt.nl/v5JL/api/health` → proxies to `http://127.0.0.1:5010/health`
 
 ## Deployment Process
 
@@ -122,6 +127,23 @@ System prompt configured for minimal, efficient code:
 - Started PM2 `v5jl-chat` process
 - Updated nginx to proxy Flask servers instead of serving static files
 - Fixed frontend API URL from `http://localhost:5000` to `/v5JL/api`
+
+### 6. Production API 404 Errors (October 22, 2025)
+**Problem**: API endpoint returning 404 errors in production
+**Root Causes**:
+1. Old ainotebook process occupying port 5000
+2. Nginx proxying to wrong port
+3. Nginx not stripping `/v5JL/api` prefix from requests
+4. Basic authentication blocking API requests
+
+**Solutions**:
+1. Killed orphaned ainotebook process (PID 1231002)
+2. Updated nginx to proxy to correct port (5010)
+3. Added trailing slashes: `location /v5JL/api/` + `proxy_pass http://127.0.0.1:5010/`
+4. Added `auth_basic off;` to API location block
+5. Updated frontend auto-detection for localhost vs production
+
+**Verification**: `curl https://www.slimpunt.nl/v5JL/api/health` returns `{"message":"Backend is running","status":"ok"}`
 
 ## File Structure
 

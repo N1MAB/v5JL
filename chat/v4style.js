@@ -1,4 +1,12 @@
-const BACKEND_URL = '/v5JL/api';
+// Auto-detect backend URL based on environment
+// Voor development: altijd localhost:5000
+// Voor file:// protocol: ook localhost:5000
+const BACKEND_URL = (
+    window.location.protocol === 'file:' ||
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1' ||
+    window.location.hostname === ''
+) ? 'http://localhost:5000' : '/v5JL/api';
 const contentContainer = document.getElementById('contentContainer');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
@@ -813,7 +821,31 @@ async function runCell(cellId) {
 
             // Text output
             if (data.output) {
-                output += `<pre>${escapeHtml(data.output)}</pre>`;
+                // Check if output contains HTML table markers
+                if (data.output.includes('<!--HTML_TABLE_START-->') && data.output.includes('<!--HTML_TABLE_END-->')) {
+                    // Extract and render HTML tables
+                    let processedOutput = data.output;
+                    const tableRegex = /<!--HTML_TABLE_START-->([\s\S]*?)<!--HTML_TABLE_END-->/g;
+
+                    processedOutput = processedOutput.replace(tableRegex, (match, tableHtml) => {
+                        // Return the HTML table directly (not escaped)
+                        return `<div class="table-container">${tableHtml}</div>`;
+                    });
+
+                    // Escape remaining text (not tables) and wrap in pre
+                    const parts = processedOutput.split(/(<div class="table-container">[\s\S]*?<\/div>)/);
+                    output += parts.map(part => {
+                        if (part.startsWith('<div class="table-container">')) {
+                            return part; // Keep HTML tables as-is
+                        } else if (part.trim()) {
+                            return `<pre>${escapeHtml(part)}</pre>`; // Escape text
+                        }
+                        return '';
+                    }).join('');
+                } else {
+                    // Regular text output
+                    output += `<pre>${escapeHtml(data.output)}</pre>`;
+                }
             }
 
             // Matplotlib plots
@@ -1045,7 +1077,23 @@ async function handleFileUpload(event) {
 
         // Show success message
         const sizeMB = (file.size / 1024 / 1024).toFixed(2);
-        addAssistantMessage(`File loaded: ${file.name} (${sizeMB} MB) - Stored in browser\n\nI can now generate code to analyze this file. Just ask me!`);
+        addAssistantMessage(`File loaded: ${file.name} (${sizeMB} MB) - Stored in browser\n\n🔒 Running privacy scan...`);
+
+        // 🔒 PRIVACY SCAN - Detect sensitive columns
+        // Wait a moment for file to be injected into backend namespace
+        setTimeout(async () => {
+            const scanResults = await scanFilePrivacy();
+
+            if (scanResults && scanResults.sensitive_columns && Object.keys(scanResults.sensitive_columns).length > 0) {
+                // Sensitive columns found - show warning
+                console.log('⚠️ Sensitive columns detected!');
+                showSensitiveColumnWarning(scanResults);
+            } else {
+                // No sensitive columns found
+                console.log('✓ No sensitive columns detected');
+                addAssistantMessage('✓ Privacy scan complete - No sensitive columns detected.\n\nI can now generate code to analyze this file. Just ask me!');
+            }
+        }, 500);
 
         // Reset file input
         event.target.value = '';
@@ -1070,30 +1118,122 @@ function readFileAsBase64(file) {
     });
 }
 
-// Update file indicator UI
+// PREMIUM: Geen floating overlays - alles clean
 function updateFileIndicator() {
-    const indicator = document.getElementById('fileIndicator');
-    const nameElement = document.getElementById('fileIndicatorName');
-    const sizeElement = document.getElementById('fileIndicatorSize');
+    // Simpel - update alleen header title als file is geladen
+    const headerTitle = document.querySelector('.header h1');
 
-    if (uploadedFile) {
-        // Update indicator content
-        nameElement.textContent = uploadedFile.filename;
-        const sizeMB = (uploadedFile.fileSize / 1024 / 1024).toFixed(2);
-        sizeElement.textContent = `(${sizeMB} MB)`;
-
-        // Show indicator
-        indicator.style.display = 'block';
-
-        // Adjust content padding to account for indicator
-        contentContainer.style.paddingTop = '170px';
-    } else {
-        // Hide indicator
-        indicator.style.display = 'none';
-
-        // Reset content padding
-        contentContainer.style.paddingTop = '130px';
+    if (uploadedFile && headerTitle) {
+        // Toon filename in header title (subtiel)
+        headerTitle.innerHTML = `📊 AI Jupyter Notebook <span style="color: #858585; font-size: 12px; font-weight: 400; margin-left: 12px;">📄 ${uploadedFile.filename}</span>`;
+    } else if (headerTitle) {
+        // Reset to default
+        headerTitle.textContent = '📊 AI Jupyter Notebook';
     }
+
+    // Geen padding nodig - header is gewoon normale flow
+}
+
+// 🔒 PRIVACY FUNCTIONS
+
+async function scanFilePrivacy() {
+    /**
+     * Scan uploaded file for sensitive columns
+     * Calls backend /scan-file-privacy endpoint
+     */
+    if (!uploadedFile) {
+        console.log('No file to scan');
+        return null;
+    }
+
+    try {
+        const response = await fetch(`${BACKEND_URL}/scan-file-privacy`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-ID': SESSION_ID
+            }
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('Privacy scan error:', data.error);
+            return null;
+        }
+
+        console.log('🔍 Privacy scan results:', data);
+        return data;
+
+    } catch (error) {
+        console.error('Privacy scan failed:', error);
+        return null;
+    }
+}
+
+function showSensitiveColumnWarning(scanResults) {
+    /**
+     * Show modal with sensitive column warning
+     * @param {Object} scanResults - Results from /scan-file-privacy
+     */
+    const modal = document.getElementById('sensitiveColumnModal');
+    const content = document.getElementById('sensitiveWarningContent');
+
+    // Build warning content
+    let html = '<p style="margin-bottom: 16px;">De volgende gevoelige kolommen zijn gedetecteerd in je bestand:</p>';
+
+    const categoryLabels = {
+        'personal_identifiers': '👤 Persoonlijke Identificatie',
+        'financial': '💰 Financieel',
+        'medical': '🏥 Medisch',
+        'confidential': '🔒 Vertrouwelijk'
+    };
+
+    for (const [category, columns] of Object.entries(scanResults.sensitive_columns)) {
+        const label = categoryLabels[category] || category;
+        html += `
+            <div class="sensitive-category">
+                <div class="sensitive-category-title">${label}</div>
+                <ul class="sensitive-column-list">
+                    ${columns.map(col => `<li>${col}</li>`).join('')}
+                </ul>
+            </div>
+        `;
+    }
+
+    html += `
+        <div style="margin-top: 20px; padding: 12px; background: rgba(78, 201, 176, 0.1); border-left: 3px solid #4ec9b0; border-radius: 4px;">
+            <strong>🔒 Privacy Bescherming Actief</strong>
+            <p style="margin-top: 8px; font-size: 13px;">
+                De AI assistent ziet <strong>ALLEEN metadata</strong> (kolomnamen, types, statistieken).<br>
+                <strong>Geen enkele data value</strong> wordt naar de AI gestuurd.
+            </p>
+        </div>
+    `;
+
+    content.innerHTML = html;
+
+    // Show modal
+    modal.classList.add('active');
+}
+
+function closeSensitiveWarning() {
+    /**
+     * Close sensitive column warning modal
+     */
+    const modal = document.getElementById('sensitiveColumnModal');
+    modal.classList.remove('active');
+}
+
+function proceedWithFile() {
+    /**
+     * User confirmed they understand the privacy protection
+     * Close modal and continue
+     */
+    closeSensitiveWarning();
+
+    // Show confirmation message
+    addAssistantMessage('File geladen met privacy bescherming actief. Je kunt nu vragen stellen over de data!');
 }
 
 // Clear uploaded file from browser memory

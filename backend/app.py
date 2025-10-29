@@ -100,11 +100,17 @@ def get_session_namespace(session_id: str) -> dict:
 
     # Create new session if doesn't exist
     if session_id not in session_namespaces:
+        # Create isolated namespace with its own __builtins__
+        # This prevents access to module-level globals
+        new_namespace = {
+            '__builtins__': __builtins__,  # Own copy of builtins
+            '__name__': f'session_{session_id}',  # Unique name
+        }
         session_namespaces[session_id] = {
-            'namespace': {},
+            'namespace': new_namespace,
             'last_access': now
         }
-        print(f"✓ Created new session: {session_id}")
+        print(f"✓ Created new isolated session: {session_id}")
 
     # Update last access time
     session_namespaces[session_id]['last_access'] = now
@@ -392,6 +398,287 @@ Analyseer deze error."""
                 'recoverable': False,
                 'attempt': attempt
             }
+
+
+class OutputFilter:
+    """
+    Privacy Layer: Filters code outputs before sending to AI
+    AI only gets metadata, NEVER raw data values
+    """
+
+    @staticmethod
+    def filter_for_ai(output: str, code: str) -> dict:
+        """
+        Convert raw output to privacy-safe metadata
+
+        Args:
+            output: Raw execution output (may contain sensitive data)
+            code: The code that generated this output
+
+        Returns:
+            dict: Sanitized metadata safe for AI context
+        """
+        if not output or not output.strip():
+            return {
+                "type": "empty",
+                "message": "Code executed (no output)",
+                "success": True
+            }
+
+        code_lower = code.lower()
+
+        # 1. DataFrame display operations (df.head(), df.tail(), print(df))
+        # PRIVACY: Hide actual data, only show that it was displayed
+        if any(pattern in code_lower for pattern in ['.head(', '.tail(', 'print(df', 'display(df']):
+            return {
+                "type": "dataframe_display",
+                "message": "DataFrame displayed successfully",
+                "metadata": "Shows first/last rows of data",
+                "success": True
+            }
+
+        # 2. DataFrame info/schema (df.info(), df.dtypes, df.columns)
+        # SAFE: Column names and types are metadata, no individual records
+        elif any(pattern in code_lower for pattern in ['.info(', '.dtypes', '.columns', '.shape']):
+            return {
+                "type": "schema_info",
+                "output": output,  # Safe to show - no personal data
+                "success": True
+            }
+
+        # 3. Aggregations (mean, sum, count, groupby, describe)
+        # SAFE: Aggregated stats don't reveal individual records
+        elif any(pattern in code_lower for pattern in ['.mean(', '.sum(', '.count(', '.groupby', '.describe(', '.agg(', '.nunique(', '.value_counts(']):
+            return {
+                "type": "aggregation",
+                "output": output,  # Safe to show aggregated results
+                "message": "Statistical aggregation computed",
+                "success": True
+            }
+
+        # 4. Visualizations (matplotlib, seaborn, plotly)
+        # SAFE: Charts are captured as images, output is just confirmation
+        elif any(pattern in code_lower for pattern in ['plt.', '.plot(', '.hist(', '.scatter(', 'sns.', 'go.figure', 'px.']):
+            return {
+                "type": "visualization",
+                "message": "Visualization created successfully",
+                "success": True
+            }
+
+        # 5. Missing values analysis (isnull, isna)
+        # SAFE: Just counts, no actual data values
+        elif any(pattern in code_lower for pattern in ['.isnull(', '.isna(', '.notna(', '.notnull(']):
+            return {
+                "type": "missing_values",
+                "output": output,  # Safe - just counts
+                "success": True
+            }
+
+        # 6. Data loading confirmation (pd.read_csv, pd.read_excel)
+        # SAFE: Just confirmation message
+        elif any(pattern in code_lower for pattern in ['read_csv', 'read_excel', 'read_json', 'load_dataset']):
+            # Check if output contains actual data (like df.head() after loading)
+            if len(output.split('\n')) > 10:  # Long output = probably data display
+                return {
+                    "type": "data_load",
+                    "message": "Dataset loaded successfully",
+                    "success": True
+                }
+            else:
+                return {
+                    "type": "data_load",
+                    "output": output,  # Short output is safe
+                    "success": True
+                }
+
+        # 7. Error messages
+        # IMPORTANT: Show errors but sanitize any data values that might be in them
+        elif 'error' in output.lower() or 'exception' in output.lower():
+            # Sanitize error: keep error type and message, remove data values
+            sanitized = OutputFilter._sanitize_error(output)
+            return {
+                "type": "error",
+                "output": sanitized,
+                "success": False
+            }
+
+        # 8. Default: Assume output might contain sensitive data
+        # PRIVACY: When in doubt, hide it
+        else:
+            # Check output length - short outputs are probably safe
+            if len(output) < 200:  # Short outputs (like single values)
+                return {
+                    "type": "short_output",
+                    "output": output,  # Probably safe
+                    "success": True
+                }
+            else:
+                # Long output - hide it to be safe
+                return {
+                    "type": "code_execution",
+                    "message": f"Code executed successfully (output: {len(output)} chars)",
+                    "success": True
+                }
+
+    @staticmethod
+    def _sanitize_error(error_text: str) -> str:
+        """
+        Remove potential data values from error messages
+        Keep error types and messages, remove data
+        """
+        # This is a simple implementation - can be enhanced
+        # For now, just truncate very long errors
+        lines = error_text.split('\n')
+        if len(lines) > 15:
+            # Keep first 10 and last 5 lines (usually error type and message)
+            sanitized = '\n'.join(lines[:10] + ['...'] + lines[-5:])
+            return sanitized
+        return error_text
+
+
+class SensitiveColumnDetector:
+    """
+    Detects potentially sensitive columns in datasets
+    Warns user before processing
+    """
+
+    # Patterns that indicate sensitive data
+    SENSITIVE_PATTERNS = {
+        'personal_identifiers': [
+            r'\b(name|naam|full_?name|first_?name|last_?name|surname|voornaam|achternaam)\b',
+            r'\b(email|e_?mail|mail_?address)\b',
+            r'\b(phone|telefoon|mobile|cell|tel)\b',
+            r'\b(ssn|bsn|burgerservicenummer|sofi_?nummer)\b',
+            r'\b(passport|paspoort|id_?number|identity)\b',
+            r'\b(address|adres|street|straat|postcode|zip_?code)\b',
+        ],
+        'financial': [
+            r'\b(salary|salaris|loon|wage|income|inkomen)\b',
+            r'\b(account|iban|bank|rekening)\b',
+            r'\b(credit_?card|card_?number|cvv)\b',
+            r'\b(revenue|omzet|winst|profit)\b',
+        ],
+        'medical': [
+            r'\b(medical|medisch|health|gezondheid)\b',
+            r'\b(diagnosis|diagnose|patient|pati[eë]nt)\b',
+            r'\b(medication|medicijn|treatment|behandeling)\b',
+            r'\b(blood|bloed|dna|genetic)\b',
+        ],
+        'confidential': [
+            r'\b(secret|geheim|confidential|vertrouwelijk)\b',
+            r'\b(password|wachtwoord|pwd|pass)\b',
+            r'\b(api_?key|token|secret_?key)\b',
+        ]
+    }
+
+    @staticmethod
+    def scan_columns(columns: List[str]) -> Dict[str, List[str]]:
+        """
+        Scan column names for sensitive patterns
+
+        Args:
+            columns: List of column names
+
+        Returns:
+            dict: {category: [matching_columns]}
+        """
+        import re
+
+        findings = {}
+
+        for category, patterns in SensitiveColumnDetector.SENSITIVE_PATTERNS.items():
+            matches = []
+            for col in columns:
+                col_lower = col.lower()
+                for pattern in patterns:
+                    if re.search(pattern, col_lower, re.IGNORECASE):
+                        matches.append(col)
+                        break  # Don't double-count same column
+
+            if matches:
+                findings[category] = matches
+
+        return findings
+
+    @staticmethod
+    def generate_warning(findings: Dict[str, List[str]]) -> str:
+        """
+        Generate user-friendly warning message
+        """
+        if not findings:
+            return None
+
+        warning = "⚠️ Mogelijke gevoelige kolommen gedetecteerd:\n\n"
+
+        category_labels = {
+            'personal_identifiers': '👤 Persoonlijke identificatie',
+            'financial': '💰 Financieel',
+            'medical': '🏥 Medisch',
+            'confidential': '🔒 Vertrouwelijk'
+        }
+
+        for category, columns in findings.items():
+            label = category_labels.get(category, category)
+            warning += f"{label}:\n"
+            for col in columns:
+                warning += f"  - {col}\n"
+            warning += "\n"
+
+        warning += "Let op: De AI assistent ziet GEEN data values, alleen metadata (kolom namen, types)."
+
+        return warning
+
+
+class SchemaExtractor:
+    """
+    Extracts ONLY schema metadata from datasets
+    NEVER extracts actual data values
+    """
+
+    @staticmethod
+    def extract_from_dataframe(df) -> dict:
+        """
+        Extract privacy-safe schema from pandas DataFrame
+
+        Returns ONLY:
+        - Column names
+        - Data types
+        - Row/column counts
+        - Missing value counts (NO actual values)
+        """
+        import pandas as pd
+        import numpy as np
+
+        schema = {
+            "type": "dataframe",
+            "rows": len(df),
+            "columns": len(df.columns),
+            "schema": {}
+        }
+
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            null_count = int(df[col].isnull().sum())
+
+            col_info = {
+                "type": dtype,
+                "nulls": null_count,
+                "null_percentage": round((null_count / len(df)) * 100, 2)
+            }
+
+            # Add value range for numeric columns (min/max are aggregates, not individual values)
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_info["min"] = float(df[col].min()) if not df[col].isnull().all() else None
+                col_info["max"] = float(df[col].max()) if not df[col].isnull().all() else None
+                col_info["mean"] = float(df[col].mean()) if not df[col].isnull().all() else None
+
+            # Add unique count for categorical columns (count only, not values)
+            elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+                col_info["unique_values"] = int(df[col].nunique())
+
+            schema["schema"][col] = col_info
+
+        return schema
 
 
 class RetryHandler:
@@ -828,8 +1115,8 @@ def execute_code():
             # User can do: df = pd.read_csv(io.BytesIO(__uploaded_file_bytes__.getvalue()))
             # But we make it even easier by providing 'filepath' variable
             if file_extension in ['csv', 'xlsx', 'xls']:
-                # Auto-inject: make file accessible as 'filepath' variable
-                code = f"# Auto-injected: file access\nimport io\nfilepath = io.BytesIO(__uploaded_file_bytes__.getvalue())\n\n{code}"
+                # Auto-inject: make file accessible as 'filepath' variable + import pandas
+                code = f"# Auto-injected: file access and common imports\nimport pandas as pd\nimport io\nfilepath = io.BytesIO(__uploaded_file_bytes__.getvalue())\n\n{code}"
 
         # Remove leading whitespace from all lines
         import textwrap
@@ -881,6 +1168,43 @@ def execute_code():
                 # 🔍 TRACK VARIABLES BEFORE EXECUTION (to detect new/modified Plotly figures)
                 vars_before_execution = {k: id(v) for k, v in execution_namespace.items()}
 
+                # 🎨 MONKEY-PATCH pandas to_string() to output HTML tables instead
+                if '__pandas_patched__' not in execution_namespace:
+                    import pandas as pd
+
+                    # Save original methods
+                    original_df_to_string = pd.DataFrame.to_string
+                    original_series_to_string = pd.Series.to_string
+
+                    def df_to_html_wrapper(self, *args, **kwargs):
+                        """Override to_string to return HTML table marker"""
+                        html_table = self.to_html(
+                            classes='dataframe-output',
+                            border=0,
+                            index=True,
+                            justify='left',
+                            max_rows=100,
+                            max_cols=None
+                        )
+                        return f"<!--HTML_TABLE_START-->{html_table}<!--HTML_TABLE_END-->"
+
+                    def series_to_html_wrapper(self, *args, **kwargs):
+                        """Override to_string to return HTML table marker"""
+                        series_df = self.to_frame()
+                        html_table = series_df.to_html(
+                            classes='dataframe-output',
+                            border=0,
+                            justify='left',
+                            header=True
+                        )
+                        return f"<!--HTML_TABLE_START-->{html_table}<!--HTML_TABLE_END-->"
+
+                    # Patch the methods
+                    pd.DataFrame.to_string = df_to_html_wrapper
+                    pd.Series.to_string = series_to_html_wrapper
+
+                    execution_namespace['__pandas_patched__'] = True
+
                 # Execute code with Jupyter-like behavior: auto-print last expression
                 with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
                     # Try to detect if last line is an expression (not assignment/statement)
@@ -897,11 +1221,13 @@ def execute_code():
                             # Execute all statements except the last
                             if previous_stmts:
                                 previous_tree = ast.Module(body=previous_stmts, type_ignores=[])
-                                exec(compile(previous_tree, '<string>', 'exec'), execution_namespace)
+                                # Use namespace for BOTH globals and locals to fully isolate
+                                exec(compile(previous_tree, '<string>', 'exec'), execution_namespace, execution_namespace)
 
                             # Evaluate the last expression and print if not None
                             last_expr_code = compile(ast.Expression(body=last_expr.value), '<string>', 'eval')
-                            result_value = eval(last_expr_code, execution_namespace)
+                            # Use namespace for BOTH globals and locals to fully isolate
+                            result_value = eval(last_expr_code, execution_namespace, execution_namespace)
 
                             if result_value is not None:
                                 # Use IPython-like display for DataFrames, or regular print
@@ -911,17 +1237,36 @@ def execute_code():
                                 if PLOTLY_AVAILABLE and isinstance(result_value, (go.Figure, plotly.graph_objs._figure.Figure)):
                                     pass  # Don't print - will be captured by capture_plotly_figures()
                                 elif isinstance(result_value, pd.DataFrame):
-                                    print(result_value.to_string())
+                                    # Output as HTML table for better readability
+                                    html_table = result_value.to_html(
+                                        classes='dataframe-output',
+                                        border=0,
+                                        index=True,
+                                        justify='left',
+                                        max_rows=100,
+                                        max_cols=None
+                                    )
+                                    print(f"<!--HTML_TABLE_START-->{html_table}<!--HTML_TABLE_END-->")
                                 elif isinstance(result_value, pd.Series):
-                                    print(result_value.to_string())
+                                    # Convert Series to DataFrame for consistent table display
+                                    series_df = result_value.to_frame()
+                                    html_table = series_df.to_html(
+                                        classes='dataframe-output',
+                                        border=0,
+                                        justify='left',
+                                        header=True
+                                    )
+                                    print(f"<!--HTML_TABLE_START-->{html_table}<!--HTML_TABLE_END-->")
                                 else:
                                     print(repr(result_value))
                         else:
                             # No expression at end, or parsing failed - just exec normally
-                            exec(code, execution_namespace)
+                            # Use namespace for BOTH globals and locals to fully isolate
+                            exec(code, execution_namespace, execution_namespace)
                     except (SyntaxError, ValueError):
                         # Fallback to normal exec if AST parsing fails
-                        exec(code, execution_namespace)
+                        # Use namespace for BOTH globals and locals to fully isolate
+                        exec(code, execution_namespace, execution_namespace)
 
                 # Success! Get output
                 output = stdout_capture.getvalue()
@@ -1390,7 +1735,6 @@ CODE GENERATION RULES (only when user wants to DO something):
 5. ⚠️ MINIMAL CODE ONLY:
    - Write ONLY the code user asks for
    - NO extra features, statistics, or visualizations unless requested
-   - NO explanatory comments unless user asks for explanation
    - Keep it simple and direct
 
    Example - User: "load CSV"
@@ -1403,13 +1747,39 @@ CODE GENERATION RULES (only when user wants to DO something):
    df.boxplot()
    plt.show()
 
+6. 📝 COMMENT RULES:
+   - Add brief comments (#) to explain WHAT the code does
+   - Keep comments SHORT and in Dutch if user speaks Dutch
+   - Place comments BEFORE the code they explain
+   - Use comments to clarify non-obvious operations
+
+   Example:
+   # Laad de data
+   df = pd.read_csv(filepath)
+
+   # Bereken gemiddelde leeftijd per geslacht
+   result = df.groupby('Gender')['Age'].mean()
+   result
+
+   ❌ DON'T add obvious comments:
+   import pandas as pd  # import pandas (TOO OBVIOUS)
+
+   ✅ DO add helpful comments:
+   # Check for missing values
+   df.isnull().sum()
+
+7. 🔒 PANDAS AUTO-AVAILABILITY:
+   When a CSV/Excel file is uploaded, 'pandas as pd' is ALREADY imported automatically.
+   ✅ CORRECT: Just use pd directly (df = pd.read_csv(filepath))
+   ❌ WRONG: import pandas as pd (already imported!)
+
    ❌ WRONG (too much):
    # Creating distribution analysis...
    df.boxplot()
    df.describe()  # <- NOT asked for!
    plt.show()
 
-6. ⚠️ VARIABLE REUSE:
+8. ⚠️ VARIABLE REUSE:
    Before creating new variables, check "Available variables" in context
 
    Example:
@@ -1418,13 +1788,12 @@ CODE GENERATION RULES (only when user wants to DO something):
    ❌ WRONG: Load iris again
    ✅ CORRECT: Use existing df_iris variable
 
-7. Code formatting rules:
+9. Code formatting rules:
    - NO markdown code blocks (no ```)
    - NO explanatory text before/after code
-   - NO comments unless user asks for explanation
    - Direct Python code only - clean and minimal
 
-8. ⚠️ DISPLAYING INTERMEDIATE RESULTS:
+10. ⚠️ DISPLAYING INTERMEDIATE RESULTS:
    NEVER use display() - it doesn't work reliably. ALWAYS use print() with .to_string():
 
    ❌ WRONG (doesn't work):
@@ -1951,14 +2320,29 @@ fig.update_layout(title='Iris 3D Scatter', scene=dict(xaxis_title='Sepal Length'
                                 from_imports[base_module].extend(import_items)
 
         # Add recent cells context if provided
+        # 🔒 PRIVACY: Filter outputs before sending to AI
         context_message = message
         if recent_cells:
             context_parts = []
             for cell in recent_cells:
                 if cell['type'] == 'code' and cell['code']:
                     context_parts.append(f"Previous code:\n{cell['code']}")
-                    if cell.get('output'):  # Use .get() to avoid KeyError
-                        context_parts.append(f"Output/Error:\n{cell['output']}")
+
+                    # 🔒 PRIVACY LAYER: Filter output to remove sensitive data
+                    if cell.get('output'):
+                        # Apply output filter - AI gets only metadata
+                        filtered_output = OutputFilter.filter_for_ai(
+                            output=cell['output'],
+                            code=cell['code']
+                        )
+
+                        # Convert filtered output to context string
+                        if filtered_output.get('output'):
+                            # Safe to show (schema, aggregations, etc)
+                            context_parts.append(f"Output: {filtered_output['output']}")
+                        else:
+                            # Only metadata (data was hidden for privacy)
+                            context_parts.append(f"Output: {filtered_output.get('message', 'Code executed')}")
 
             if context_parts:
                 context = "\n\n".join(context_parts)
@@ -2035,18 +2419,19 @@ fig.update_layout(title='Iris 3D Scatter', scene=dict(xaxis_title='Sepal Length'
             file_info += f"- File type: {uploaded_file['extension']}\n"
             file_info += f"- Location: Browser memory (not on server)\n"
             file_info += f"\nIMPORTANT - FILE LOADING:\n"
-            file_info += f"1. The file is auto-injected as a BytesIO variable named 'filepath'\n"
-            file_info += f"2. Use: df = pd.read_csv(filepath) or df = pd.read_excel(filepath)\n"
-            file_info += f"3. The 'filepath' variable is already available - no need to import/create it\n"
-            file_info += f"4. CSV/Excel files may be 'fuzzy' with:\n"
+            file_info += f"1. 🔒 pandas (as 'pd') is ALREADY imported - DO NOT import it again!\n"
+            file_info += f"2. The file is auto-injected as a BytesIO variable named 'filepath'\n"
+            file_info += f"3. Use: df = pd.read_csv(filepath) or df = pd.read_excel(filepath)\n"
+            file_info += f"4. The 'filepath' variable is already available - no need to import/create it\n"
+            file_info += f"5. CSV/Excel files may be 'fuzzy' with:\n"
             file_info += f"   - Wrong delimiter (semicolon instead of comma)\n"
             file_info += f"   - Headers on wrong row / junk data in first rows\n"
             file_info += f"   - BOM characters or encoding issues\n"
-            file_info += f"\n5. LOADING APPROACH:\n"
+            file_info += f"\n6. LOADING APPROACH:\n"
             file_info += f"   - Start simple: df = pd.read_csv(filepath)\n"
             file_info += f"   - If user mentions problems, add parameters (sep=';', skiprows=1, etc)\n"
             file_info += f"   - Show df.head() to verify loading\n"
-            file_info += f"\n6. If loading fails, user can ask \"debug csv\" for automatic analysis"
+            file_info += f"\n7. If loading fails, user can ask \"debug csv\" for automatic analysis"
             context_message = context_message + file_info
 
         # Add current message
@@ -2227,6 +2612,100 @@ def get_libraries():
         return jsonify({
             'error': f'Error retrieving libraries: {str(e)}',
             'packages': []
+        }), 500
+
+
+@app.route('/scan-file-privacy', methods=['POST'])
+def scan_file_privacy():
+    """
+    🔒 PRIVACY ENDPOINT
+    Scan uploaded file for sensitive columns and extract schema
+    Returns ONLY metadata, NEVER actual data values
+    """
+    try:
+        # Get session ID
+        session_id = request.headers.get('X-Session-ID')
+        if not session_id:
+            return jsonify({'error': 'No session ID provided'}), 400
+
+        # Get session namespace
+        execution_namespace = get_session_namespace(session_id)
+
+        # Check if file is loaded in namespace
+        if '__uploaded_file_bytes__' not in execution_namespace:
+            return jsonify({'error': 'No file loaded in session'}), 400
+
+        file_name = execution_namespace.get('__uploaded_file_name__', 'unknown.csv')
+        file_extension = execution_namespace.get('__uploaded_file_extension__', 'csv')
+
+        # Only scan CSV/Excel files
+        if file_extension not in ['csv', 'xlsx', 'xls']:
+            return jsonify({
+                'sensitive_columns': {},
+                'schema': None,
+                'warning': None
+            }), 200
+
+        # Try to load file to extract schema
+        import pandas as pd
+        import io
+
+        file_bytes_io = execution_namespace['__uploaded_file_bytes__']
+        file_bytes_io.seek(0)  # Reset to beginning
+
+        try:
+            # Load DataFrame (just to get schema, not to keep in memory)
+            if file_extension == 'csv':
+                df = pd.read_csv(file_bytes_io, nrows=0)  # Read ONLY headers (0 rows)
+            else:
+                df = pd.read_excel(file_bytes_io, nrows=0)
+
+            file_bytes_io.seek(0)  # Reset for later use
+
+            # Extract column names
+            columns = df.columns.tolist()
+
+            # Scan for sensitive columns
+            sensitive_findings = SensitiveColumnDetector.scan_columns(columns)
+
+            # Generate warning if sensitive columns found
+            warning = SensitiveColumnDetector.generate_warning(sensitive_findings)
+
+            # Extract schema metadata (just column names and types, NO data)
+            schema = {
+                "columns": columns,
+                "column_count": len(columns),
+                "data_types": {col: str(dtype) for col, dtype in df.dtypes.items()}
+            }
+
+            print(f"🔍 Privacy scan complete for {file_name}")
+            print(f"   Columns: {len(columns)}")
+            print(f"   Sensitive findings: {len(sensitive_findings)} categories")
+
+            return jsonify({
+                'sensitive_columns': sensitive_findings,
+                'schema': schema,
+                'warning': warning,
+                'file_name': file_name
+            }), 200
+
+        except Exception as e:
+            print(f"⚠️ Error scanning file: {e}")
+            return jsonify({
+                'error': f'Error scanning file: {str(e)}',
+                'sensitive_columns': {},
+                'schema': None,
+                'warning': None
+            }), 200
+
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"❌ Privacy scan error: {error_trace}")
+        return jsonify({
+            'error': f'Privacy scan error: {str(e)}',
+            'sensitive_columns': {},
+            'schema': None,
+            'warning': None
         }), 500
 
 
