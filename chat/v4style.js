@@ -9,9 +9,11 @@ const BACKEND_URL = (
 ) ? 'http://localhost:5000' : '/v5JL/api';
 const contentContainer = document.getElementById('contentContainer');
 const messageInput = document.getElementById('messageInput');
-const sendBtn = document.getElementById('sendBtn');
 const backendStatus = document.getElementById('backendStatus');
 const autoRunToggle = document.getElementById('autoRunToggle');
+
+// Setup mobile keyboard handling
+setupMobileKeyboardHandling();
 
 // Generate unique session ID for this browser tab
 function generateSessionId() {
@@ -66,11 +68,41 @@ async function checkBackend() {
 checkBackend();
 setInterval(checkBackend, 30000);
 
-// Auto-resize textarea
-messageInput.addEventListener('input', function() {
-    this.style.height = 'auto';
-    this.style.height = Math.min(this.scrollHeight, 80) + 'px';
-});
+// Mobile keyboard handling from v4
+function setupMobileKeyboardHandling() {
+    if (!window.visualViewport) {
+        console.log('Visual Viewport API not supported');
+        return;
+    }
+
+    const inputContainer = document.querySelector('.input-container');
+    const input = document.getElementById('messageInput');
+
+    const updateInputPosition = () => {
+        const offsetTop = window.visualViewport.offsetTop;
+        const viewportHeight = window.visualViewport.height;
+        const windowHeight = window.innerHeight;
+
+        // When keyboard is open, offsetTop > 0 or viewportHeight < windowHeight
+        if (offsetTop > 0 || viewportHeight < windowHeight) {
+            const keyboardHeight = windowHeight - viewportHeight;
+            inputContainer.style.bottom = `${keyboardHeight}px`;
+        } else {
+            inputContainer.style.bottom = '0px';
+        }
+    };
+
+    window.visualViewport.addEventListener('resize', updateInputPosition);
+    window.visualViewport.addEventListener('scroll', updateInputPosition);
+
+    input.addEventListener('focus', () => {
+        setTimeout(updateInputPosition, 300);
+    });
+
+    input.addEventListener('blur', () => {
+        inputContainer.style.bottom = '0px';
+    });
+}
 
 // Quick prompts - only handle buttons that have a data-prompt attribute
 document.querySelectorAll('.quick-prompt-btn').forEach(btn => {
@@ -85,10 +117,13 @@ document.querySelectorAll('.quick-prompt-btn').forEach(btn => {
     });
 });
 
-// Send message
+// Send message (v4 style - simple and works on mobile)
 async function sendMessage() {
     const message = messageInput.value.trim();
     if (!message) return;
+
+    // Clear input immediately (like v4)
+    messageInput.value = '';
 
     // Smart context detection: if message is about errors/output and insertAfterCellId not set, auto-detect
     if (!insertAfterCellId) {
@@ -116,12 +151,8 @@ async function sendMessage() {
     // Track in chat history
     chatHistory.push({ role: 'user', content: message });
 
-    messageInput.value = '';
-    messageInput.style.height = 'auto';
-
     // Show loading
     const loadingId = addLoading();
-    sendBtn.disabled = true;
 
     try {
         // Build request body
@@ -208,7 +239,6 @@ async function sendMessage() {
         addAssistantMessage(errorMsg);
         chatHistory.push({ role: 'assistant', content: errorMsg });
     } finally {
-        sendBtn.disabled = false;
         // Reset insert position after message is sent
         insertAfterCellId = null;
     }
@@ -1032,6 +1062,74 @@ function toggleCode() {
     btn.classList.toggle('active', codeHidden);
 }
 
+// Parse CSV quickly in browser to get basic info
+function parseCSVInfo(csvText) {
+    const lines = csvText.split('\n').filter(line => line.trim());
+    if (lines.length === 0) return null;
+
+    // Get headers (first line)
+    const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+
+    // Count rows (excluding header)
+    const rowCount = lines.length - 1;
+
+    // Estimate memory (rough)
+    const memoryMB = (new Blob([csvText]).size / (1024 * 1024)).toFixed(2);
+
+    // Analyze first 100 rows for data types and NaN counts
+    const sampleSize = Math.min(100, lines.length - 1);
+    const columnInfo = headers.map((header, colIndex) => {
+        let nanCount = 0;
+        let numericCount = 0;
+        let dateCount = 0;
+
+        for (let i = 1; i <= sampleSize; i++) {
+            const row = lines[i].split(',');
+            const value = row[colIndex]?.trim().replace(/^["']|["']$/g, '');
+
+            // Check for NaN/empty
+            if (!value || value === '' || value.toLowerCase() === 'nan' || value.toLowerCase() === 'null') {
+                nanCount++;
+                continue;
+            }
+
+            // Check if numeric
+            if (!isNaN(value) && value !== '') {
+                numericCount++;
+            }
+
+            // Check if date-like
+            if (/^\d{4}-\d{2}-\d{2}/.test(value) || /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(value)) {
+                dateCount++;
+            }
+        }
+
+        // Determine type
+        let dtype = 'object';
+        if (numericCount > sampleSize * 0.8) {
+            dtype = 'int64';
+        } else if (dateCount > sampleSize * 0.5) {
+            dtype = 'datetime';
+        }
+
+        // Scale NaN count to full dataset
+        const estimatedNaN = Math.round((nanCount / sampleSize) * rowCount);
+
+        return {
+            name: header,
+            dtype: dtype,
+            nanCount: estimatedNaN
+        };
+    });
+
+    return {
+        columns: headers,
+        rows: rowCount,
+        memoryMB: memoryMB,
+        columnInfo: columnInfo
+    };
+}
+
 // File upload handler - CLIENT-SIDE ONLY (no server upload)
 async function handleFileUpload(event) {
     const file = event.target.files[0];
@@ -1040,28 +1138,49 @@ async function handleFileUpload(event) {
     // Check file size (max 10MB for browser memory safety)
     const MAX_SIZE = 10 * 1024 * 1024; // 10MB
     if (file.size > MAX_SIZE) {
-        addAssistantMessage(`File too large: ${(file.size / 1024 / 1024).toFixed(2)} MB. Maximum is 10 MB.\n\nPlease use a smaller file or filter your data first.`);
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'message assistant';
+        errorMsg.innerHTML = `<span class="message-content">File too large: ${(file.size / 1024 / 1024).toFixed(2)} MB. Maximum is 10 MB.<br><br>Please use a smaller file or filter your data first.</span>`;
+        contentContainer.appendChild(errorMsg);
         event.target.value = '';
         return;
     }
 
     // Show loading message
-    addAssistantMessage(`Loading ${file.name} into browser memory...`);
+    const loadingMsg = document.createElement('div');
+    loadingMsg.className = 'message assistant';
+    loadingMsg.innerHTML = `<span class="message-content">Loading ${file.name}...</span>`;
+    contentContainer.appendChild(loadingMsg);
 
     try {
-        // Read file into browser memory using FileReader API
-        const fileData = await readFileAsBase64(file);
-
         // Get file extension
         const extension = file.name.split('.').pop().toLowerCase();
 
         // Validate file type
         const validExtensions = ['csv', 'xlsx', 'xls', 'json', 'txt'];
         if (!validExtensions.includes(extension)) {
-            addAssistantMessage(`Unsupported file type: .${extension}\n\nSupported types: CSV, Excel (xlsx/xls), JSON, TXT`);
+            const errorMsg = document.createElement('div');
+            errorMsg.className = 'message assistant';
+            errorMsg.innerHTML = `<span class="message-content">Unsupported file type: .${extension}<br><br>Supported types: CSV, Excel (xlsx/xls), JSON, TXT</span>`;
+            contentContainer.appendChild(errorMsg);
             event.target.value = '';
             return;
         }
+
+        // For CSV: also read as text for instant parsing
+        let csvInfo = null;
+        if (extension === 'csv') {
+            const csvText = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = reject;
+                reader.readAsText(file);
+            });
+            csvInfo = parseCSVInfo(csvText);
+        }
+
+        // Read file as base64 for backend
+        const fileData = await readFileAsBase64(file);
 
         // Store file in browser memory
         uploadedFile = {
@@ -1075,25 +1194,32 @@ async function handleFileUpload(event) {
         // Update file indicator UI
         updateFileIndicator();
 
-        // Show success message
+        // Simple success message - no auto info
         const sizeMB = (file.size / 1024 / 1024).toFixed(2);
-        addAssistantMessage(`File loaded: ${file.name} (${sizeMB} MB) - Stored in browser\n\n🔒 Running privacy scan...`);
+        const successMsg = document.createElement('div');
+        successMsg.className = 'message assistant';
+        successMsg.innerHTML = `<span class="message-content">✓ File loaded: ${file.name} (${sizeMB} MB)<br><br>Running privacy scan...</span>`;
+        contentContainer.appendChild(successMsg);
 
-        // 🔒 PRIVACY SCAN - Detect sensitive columns
-        // Wait a moment for file to be injected into backend namespace
+        // Privacy scan for CSV files
         setTimeout(async () => {
             const scanResults = await scanFilePrivacy();
 
             if (scanResults && scanResults.sensitive_columns && Object.keys(scanResults.sensitive_columns).length > 0) {
                 // Sensitive columns found - show warning
-                console.log('⚠️ Sensitive columns detected!');
+                console.log('Sensitive columns detected!');
                 showSensitiveColumnWarning(scanResults);
             } else {
                 // No sensitive columns found
-                console.log('✓ No sensitive columns detected');
-                addAssistantMessage('✓ Privacy scan complete - No sensitive columns detected.\n\nI can now generate code to analyze this file. Just ask me!');
+                console.log('No sensitive columns detected');
+                const scanMsg = document.createElement('div');
+                scanMsg.className = 'message assistant';
+                scanMsg.innerHTML = `<span class="message-content">✓ Privacy scan complete - No sensitive data detected</span>`;
+                contentContainer.appendChild(scanMsg);
             }
         }, 500);
+
+        // No auto code cell - user can ask AI or create manually
 
         // Reset file input
         event.target.value = '';
@@ -1158,7 +1284,8 @@ async function scanFilePrivacy() {
         const data = await response.json();
 
         if (data.error) {
-            console.error('Privacy scan error:', data.error);
+            // File not in backend session yet - this is expected for client-side uploads
+            console.log('⏭️ Privacy scan skipped:', data.error, '(will scan when file is first used)');
             return null;
         }
 
@@ -1166,7 +1293,7 @@ async function scanFilePrivacy() {
         return data;
 
     } catch (error) {
-        console.error('Privacy scan failed:', error);
+        console.log('⏭️ Privacy scan skipped:', error.message);
         return null;
     }
 }
@@ -1342,7 +1469,6 @@ async function explainSelectedCode() {
 
     // Show loading
     const loadingId = addLoading();
-    sendBtn.disabled = true;
 
     try {
         const response = await fetch(`${BACKEND_URL}/chat`, {
@@ -1367,15 +1493,12 @@ async function explainSelectedCode() {
     } catch (error) {
         removeLoading(loadingId);
         addAssistantMessage(`Error: ${error.message}`);
-    } finally {
-        sendBtn.disabled = false;
     }
 }
 
-// Event listeners
-sendBtn.addEventListener('click', sendMessage);
+// Event listeners - Simple Enter key (like v4)
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
         e.preventDefault();
         sendMessage();
     }

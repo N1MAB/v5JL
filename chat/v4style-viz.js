@@ -934,8 +934,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         window.handleFileUpload(event);
                     }
 
-                    // Create visualization cells
-                    VizCellManager.createFromCSV(csvData, file.name);
+                    // Create visualization cells - DISABLED (only show df.info())
+                    // VizCellManager.createFromCSV(csvData, file.name);
                 };
                 reader.readAsText(file);
             } else if (window.handleFileUpload) {

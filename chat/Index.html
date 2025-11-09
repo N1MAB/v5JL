@@ -551,9 +551,10 @@
             line-height: 1.4;
         }
 
-        /* 🤖 AI Visibility Indicator for Code Outputs */
+        /* AI Visibility Indicator - DISABLED */
         .cell-output::before {
-            content: '🤖 AI sees filtered metadata only';
+            content: '';
+            display: none;
             position: absolute;
             top: 8px;
             right: 8px;
@@ -572,7 +573,7 @@
         }
 
         .cell-output:hover::before {
-            opacity: 1;
+            display: none;
         }
 
         /* Hide indicator for loading state */
@@ -671,8 +672,6 @@
             background: #252526;
             padding: 16px 20px;
             border-top: 1px solid #3e3e42;
-            display: flex;
-            gap: 12px;
             position: fixed;
             bottom: 0;
             left: 0;
@@ -681,43 +680,25 @@
         }
 
         #messageInput {
-            flex: 1;
+            width: 100%;
             background: #2d2d30;
-            border: 1px solid #3e3e42;
+            border: 2px solid #4ec9b0;
             color: #d4d4d4;
-            padding: 12px 16px;
+            padding: 14px 16px;
             border-radius: 6px;
-            font-size: 14px;
-            resize: none;
+            font-size: 16px;
             font-family: inherit;
-            max-height: 80px;
+            box-sizing: border-box;
         }
 
         #messageInput:focus {
             outline: none;
             border-color: #4ec9b0;
+            box-shadow: 0 0 0 3px rgba(78, 201, 176, 0.2);
         }
 
-        #sendBtn {
-            background: #4ec9b0;
-            border: 2px solid #4ec9b0;
-            color: #1e1e1e;
-            padding: 12px 24px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-
-        #sendBtn:hover {
-            background: #5dd9c0;
-        }
-
-        #sendBtn:disabled {
-            background: #3e3e42;
+        #messageInput::placeholder {
             color: #858585;
-            cursor: not-allowed;
         }
 
         .loading {
@@ -1164,17 +1145,27 @@ input[type="file"] {
         padding: 10px 12px;
         flex-wrap: wrap;
         gap: 8px;
+        justify-content: flex-start;
+    }
+
+    .header > div:first-child {
+        flex-shrink: 0; /* Prevent logo container from shrinking */
+        order: -1; /* Keep logo first */
+        display: flex !important; /* Force display */
     }
 
     .header-logo {
         height: 24px !important;
+        width: auto;
+        display: block !important; /* Force display */
+        object-fit: contain;
     }
 
     .header-actions {
         flex-wrap: wrap;
         gap: 6px;
-        width: 100%;
-        justify-content: space-between;
+        flex: 1;
+        justify-content: flex-end;
     }
 
     .auto-run-toggle {
@@ -1245,18 +1236,12 @@ input[type="file"] {
 
     /* Compact input area on mobile */
     .input-container {
-        padding: 10px 12px;
-        gap: 8px;
+        padding: 12px;
     }
 
     #messageInput {
-        padding: 10px 12px;
-        font-size: 14px;
-    }
-
-    #sendBtn {
-        padding: 10px 16px;
-        font-size: 13px;
+        padding: 12px 14px;
+        font-size: 16px; /* 16px prevents iOS zoom */
     }
 
     /* File manager dropdown mobile */
@@ -1991,7 +1976,8 @@ input[type="file"] {
 <body>
     <div class="header">
         <div style="display: flex; align-items: center; gap: 12px;">
-            <img src="ainotebook.png" alt="AI Notebook Logo" class="header-logo">
+            <img src="ainotebook.png" alt="AI Notebook Logo" class="header-logo" onerror="this.style.display='none'">
+            <h1>AI Notebook</h1>
         </div>
         <div class="header-actions">
             <label class="auto-run-toggle">
@@ -2086,8 +2072,7 @@ input[type="file"] {
     </div>
 
     <div class="input-container">
-        <textarea id="messageInput" placeholder="Ask me to generate code..." rows="1"></textarea>
-        <button id="sendBtn">Send</button>
+        <input type="text" id="messageInput" placeholder="Ask me to generate code... (press Enter)" autocomplete="off">
     </div>
 
     <!-- Floating explain button for code selection -->
@@ -2105,7 +2090,7 @@ input[type="file"] {
         </div>
     </div>
 
-    <script src="v4style.js?v=20"></script>
+    <script src="v4style.js?v=24"></script>
 
 <!-- File Manager JavaScript -->
 <script>
@@ -2173,9 +2158,11 @@ const BrowserFileManager = {
         const list = document.getElementById('fileList');
         const count = this.files.size;
 
-        // Update badge
-        badge.textContent = count;
-        badge.className = count > 0 ? 'file-count-badge' : 'file-count-badge empty';
+        // Update badge (only if exists)
+        if (badge) {
+            badge.textContent = count;
+            badge.className = count > 0 ? 'file-count-badge' : 'file-count-badge empty';
+        }
 
         // Update list
         if (count === 0) {

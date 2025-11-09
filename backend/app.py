@@ -915,11 +915,7 @@ df = pd.read_csv(filepath{', ' + params_str if params_str else ''})
 
 print("Dataset loaded successfully!")
 print("="*50)
-df.info()
-print("\\n" + "="*50)
-print("\\nFirst 5 rows:")
-print("="*50)
-print(df.head().to_html())"""
+df.info()"""
 
         return code
 
@@ -2430,7 +2426,7 @@ fig.update_layout(title='Iris 3D Scatter', scene=dict(xaxis_title='Sepal Length'
             file_info += f"\n6. LOADING APPROACH:\n"
             file_info += f"   - Start simple: df = pd.read_csv(filepath)\n"
             file_info += f"   - If user mentions problems, add parameters (sep=';', skiprows=1, etc)\n"
-            file_info += f"   - Show df.head() to verify loading\n"
+            file_info += f"   - Show ONLY df.info() to verify loading (NO visualizations, NO df.head() unless explicitly requested)\n"
             file_info += f"\n7. If loading fails, user can ask \"debug csv\" for automatic analysis"
             context_message = context_message + file_info
 
